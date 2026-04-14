@@ -500,7 +500,7 @@ main() {
     log_warn "服务启动失败：${service_name}"
     systemctl status "$service_name" --no-pager -l >&2 || true
     journalctl -u "$service_name" -n 200 --no-pager -l >&2 || true
-    log_warn "你也可以手动运行进行定位：/usr/local/bin/ssserver -c ${config_path} -vvv"
+    log_warn "你也可以手动运行进行定位：${ss_bin} -c ${config_path} -vvv"
     exit 1
   fi
 
