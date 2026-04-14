@@ -18,6 +18,7 @@ OPTIONS
 
 NOTES
   - If install metadata exists at <config-dir>/install-meta.json, uninstall reads it first.
+  - Explicit CLI options override install metadata.
 EOF
 }
 
@@ -26,10 +27,12 @@ log_ok() { echo "[成功] $*"; }
 log_warn() { echo "[警告] $*" >&2; }
 
 die() { echo "[错误] $*" >&2; exit 1; }
-
-if [[ ${EUID:-0} -ne 0 ]]; then
-  die "请以 root 运行：sudo bash $0"
-fi
+require_value() {
+  local opt="$1"
+  if [[ $# -lt 2 || -z "${2:-}" ]]; then
+    die "${opt} requires a value"
+  fi
+}
 
 BIN_PATH=""
 CONFIG_DIR=""
@@ -37,41 +40,81 @@ SS_USER=""
 SERVICE_NAME=""
 KEEP_USER="0"
 
+EXPLICIT_BIN_PATH="0"
+EXPLICIT_CONFIG_DIR="0"
+EXPLICIT_SS_USER="0"
+EXPLICIT_SERVICE_NAME="0"
+
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --bin-path) BIN_PATH="$2"; shift 2 ;;
-    --config-dir) CONFIG_DIR="$2"; shift 2 ;;
-    --user) SS_USER="$2"; shift 2 ;;
-    --service) SERVICE_NAME="$2"; shift 2 ;;
+    --bin-path)
+      require_value "$1" "${2:-}"
+      BIN_PATH="$2"
+      EXPLICIT_BIN_PATH="1"
+      shift 2
+      ;;
+    --config-dir)
+      require_value "$1" "${2:-}"
+      CONFIG_DIR="$2"
+      EXPLICIT_CONFIG_DIR="1"
+      shift 2
+      ;;
+    --user)
+      require_value "$1" "${2:-}"
+      SS_USER="$2"
+      EXPLICIT_SS_USER="1"
+      shift 2
+      ;;
+    --service)
+      require_value "$1" "${2:-}"
+      SERVICE_NAME="$2"
+      EXPLICIT_SERVICE_NAME="1"
+      shift 2
+      ;;
     --keep-user) KEEP_USER="1"; shift 1 ;;
     -h|--help) usage; exit 0 ;;
     *) die "Unknown option: $1 (use --help)" ;;
   esac
 done
 
-# defaults (may be overridden by install metadata)
-: "${CONFIG_DIR:=/etc/shadowsocks}"
-: "${BIN_PATH:=/usr/local/bin/ssserver}"
-: "${SS_USER:=shadowsocks}"
-: "${SERVICE_NAME:=shadowsocks-server.service}"
+if [[ ${EUID:-0} -ne 0 ]]; then
+  die "请以 root 运行：sudo bash $0"
+fi
 
-META_PATH="${CONFIG_DIR%/}/install-meta.json"
+# defaults (may be overridden by install metadata, then by explicit CLI args)
+DEFAULT_CONFIG_DIR="/etc/shadowsocks"
+DEFAULT_BIN_PATH="/usr/local/bin/ssserver"
+DEFAULT_SS_USER="shadowsocks"
+DEFAULT_SERVICE_NAME="shadowsocks-server.service"
+
+meta_config_dir="$CONFIG_DIR"
+if [[ -z "$meta_config_dir" ]]; then
+  meta_config_dir="$DEFAULT_CONFIG_DIR"
+fi
+META_PATH="${meta_config_dir%/}/install-meta.json"
+
 if [[ -f "$META_PATH" ]]; then
   if command -v jq >/dev/null 2>&1; then
     log_info "检测到安装元数据：$META_PATH"
-    BIN_PATH="$(jq -r '.ssserverPath // empty' "$META_PATH")"
-    CONFIG_DIR="$(jq -r '.configDir // empty' "$META_PATH")"
-    SS_USER="$(jq -r '.runUser // empty' "$META_PATH")"
-    SERVICE_NAME="$(jq -r '.serviceName // empty' "$META_PATH")"
 
-    : "${BIN_PATH:=/usr/local/bin/ssserver}"
-    : "${CONFIG_DIR:=/etc/shadowsocks}"
-    : "${SS_USER:=shadowsocks}"
-    : "${SERVICE_NAME:=shadowsocks-server.service}"
+    meta_bin_path="$(jq -r '.ssserverPath // empty' "$META_PATH")"
+    meta_config_dir="$(jq -r '.configDir // empty' "$META_PATH")"
+    meta_ss_user="$(jq -r '.runUser // empty' "$META_PATH")"
+    meta_service_name="$(jq -r '.serviceName // empty' "$META_PATH")"
+
+    [[ "$EXPLICIT_BIN_PATH" == "1" ]] || BIN_PATH="$meta_bin_path"
+    [[ "$EXPLICIT_CONFIG_DIR" == "1" ]] || CONFIG_DIR="$meta_config_dir"
+    [[ "$EXPLICIT_SS_USER" == "1" ]] || SS_USER="$meta_ss_user"
+    [[ "$EXPLICIT_SERVICE_NAME" == "1" ]] || SERVICE_NAME="$meta_service_name"
   else
     log_warn "未安装 jq，跳过 install-meta.json 解析"
   fi
 fi
+
+: "${CONFIG_DIR:=$DEFAULT_CONFIG_DIR}"
+: "${BIN_PATH:=$DEFAULT_BIN_PATH}"
+: "${SS_USER:=$DEFAULT_SS_USER}"
+: "${SERVICE_NAME:=$DEFAULT_SERVICE_NAME}"
 
 UNIT_PATH="/etc/systemd/system/${SERVICE_NAME}"
 

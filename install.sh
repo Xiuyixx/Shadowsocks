@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-SCRIPT_VERSION="2026-02-27"
+SCRIPT_VERSION="2026-04-14"
 INSTALL_META_VERSION="1"
 
 usage() {
@@ -47,6 +47,12 @@ log_warn() { echo "[警告] $*" >&2; }
 
 die() { echo "[错误] $*" >&2; exit 1; }
 need_cmd() { command -v "$1" >/dev/null 2>&1 || die "Missing command: $1"; }
+require_value() {
+  local opt="$1"
+  if [[ $# -lt 2 || -z "${2:-}" ]]; then
+    die "${opt} requires a value"
+  fi
+}
 
 require_root() {
   if [[ ${EUID:-0} -ne 0 ]]; then
@@ -63,7 +69,7 @@ apt_install_deps() {
   log_info "正在安装依赖..."
   # Keep output quiet for readability; apt errors still show on stderr.
   apt-get update -y >/dev/null
-  apt-get install -y --no-install-recommends ca-certificates curl jq openssl xz-utils >/dev/null
+  apt-get install -y --no-install-recommends ca-certificates curl iproute2 jq openssl xz-utils >/dev/null
   log_ok "依赖安装完成"
 }
 
@@ -287,12 +293,33 @@ cleanup_tmp() {
   fi
 }
 
-main() {
-  log_info "=== 进入一键安装模式 ==="
-  log_info "Installer version: ${SCRIPT_VERSION}"
-  require_root
-  need_cmd uname
+port_is_listening() {
+  local port="$1"
 
+  if command -v ss >/dev/null 2>&1; then
+    ss -lntup 2>/dev/null | grep -Eq ":${port}\\b"
+    return $?
+  fi
+
+  if command -v netstat >/dev/null 2>&1; then
+    netstat -lntup 2>/dev/null | grep -Eq ":${port}[[:space:]]"
+    return $?
+  fi
+
+  log_warn "未找到 ss/netstat，跳过监听端口探测，仅依赖 systemd 状态判断"
+  return 2
+}
+
+dump_process_diagnostics() {
+  if command -v pgrep >/dev/null 2>&1; then
+    pgrep -a -f '(^|/)(ssserver|shadowsocks)([[:space:]]|$)' >&2 || true
+    return 0
+  fi
+
+  ps -eo pid=,args= | awk '/ssserver|shadowsocks/ { print }' >&2 || true
+}
+
+main() {
   local port="${SS_PORT:-}"
   local password="${SS_PASSWORD:-}"
   local method="${SS_METHOD:-}"
@@ -314,14 +341,14 @@ main() {
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
-      -p|--port) port="$2"; explicit_port="1"; shift 2 ;;
-      -k|--password) password="$2"; explicit_password="1"; shift 2 ;;
-      -m|--method) method="$2"; explicit_method="1"; shift 2 ;;
-      -v|--version) version="$2"; shift 2 ;;
-      --bin-dir) bin_dir="$2"; shift 2 ;;
-      --config-dir) config_dir="$2"; shift 2 ;;
-      --user) user="$2"; shift 2 ;;
-      --mode) mode="$2"; explicit_mode="1"; shift 2 ;;
+      -p|--port) require_value "$1" "${2:-}"; port="$2"; explicit_port="1"; shift 2 ;;
+      -k|--password) require_value "$1" "${2:-}"; password="$2"; explicit_password="1"; shift 2 ;;
+      -m|--method) require_value "$1" "${2:-}"; method="$2"; explicit_method="1"; shift 2 ;;
+      -v|--version) require_value "$1" "${2:-}"; version="$2"; shift 2 ;;
+      --bin-dir) require_value "$1" "${2:-}"; bin_dir="$2"; shift 2 ;;
+      --config-dir) require_value "$1" "${2:-}"; config_dir="$2"; shift 2 ;;
+      --user) require_value "$1" "${2:-}"; user="$2"; shift 2 ;;
+      --mode) require_value "$1" "${2:-}"; mode="$2"; explicit_mode="1"; shift 2 ;;
       --no-udp) mode="tcp_only"; explicit_mode="1"; shift 1 ;;
       --skip-sha256) skip_sha256="1"; shift 1 ;;
       -h|--help) usage; exit 0 ;;
@@ -329,6 +356,11 @@ main() {
       *) die "Unknown option: $1 (use --help)" ;;
     esac
   done
+
+  log_info "=== 进入一键安装模式 ==="
+  log_info "Installer version: ${SCRIPT_VERSION}"
+  require_root
+  need_cmd uname
 
   apt_install_deps
   need_cmd curl
@@ -476,22 +508,29 @@ main() {
   log_ok "安装元数据已写入：${config_dir%/}/install-meta.json"
 
   # Verify the port is actually listening (service may exit quickly after start).
-  local tries
+  local tries listen_result
   tries=10
+  listen_result=1
   while (( tries > 0 )); do
-    if ss -lntup 2>/dev/null | grep -Eq ":${port}\\b"; then
+    if port_is_listening "$port"; then
+      listen_result=0
       log_ok "服务运行正常（已监听端口 ${port}）"
       break
+    else
+      listen_result=$?
+      if [[ "$listen_result" == "2" ]]; then
+        break
+      fi
     fi
     sleep 0.3
     tries=$((tries - 1))
   done
 
-  if (( tries == 0 )); then
+  if [[ "$listen_result" == "1" && "$tries" == "0" ]]; then
     log_warn "服务看似已启动，但未监听端口：${port}"
     systemctl status shadowsocks-server.service --no-pager -l >&2 || true
     journalctl -u shadowsocks-server.service -n 200 --no-pager -l >&2 || true
-    ps -ef | grep -E "ssserver|shadowsocks" | grep -v grep >&2 || true
+    dump_process_diagnostics
     exit 1
   fi
 
@@ -503,7 +542,7 @@ main() {
   if command -v curl >/dev/null 2>&1; then
     public_ip="$(curl -fsSL --max-time 5 https://api.ipify.org 2>/dev/null || true)"
     if [[ -z "$public_ip" ]]; then
-      public_ip="$(curl -fsSL --max-time 5 https://ifconfig.me 2>/dev/null || true)"
+      public_ip="$(curl -fsSL --max-time 5 https://ifconfig.me/ip 2>/dev/null || true)"
     fi
   fi
 

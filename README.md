@@ -51,6 +51,12 @@ curl -fsSL https://raw.githubusercontent.com/Xiuyixx/Shadowsocks/main/install.sh
 sudo SS_PORT=12345 SS_PASSWORD='YOUR_STRONG_PASSWORD' bash <(curl -fsSL https://raw.githubusercontent.com/Xiuyixx/Shadowsocks/main/install.sh)
 ```
 
+如果你所在环境不支持 `bash <(...)`，改用下面这种更通用的写法：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Xiuyixx/Shadowsocks/main/install.sh | sudo env SS_PORT=12345 SS_PASSWORD='YOUR_STRONG_PASSWORD' bash
+```
+
 ### 固定指定版本（推荐）
 
 ```bash
@@ -73,6 +79,10 @@ bash install.sh --help
 - `--version` / `SS_VERSION`（`latest` 或 `v1.22.0` 这种 tag）
 - `--mode`：传输模式（`tcp_and_udp` / `tcp_only`）
 - `--no-udp`：禁用 UDP（等价于 `--mode tcp_only`）
+
+说明：
+- `bash install.sh --help` 和 `bash uninstall.sh --help` 可直接查看帮助，不要求 root。
+- 如果像 `--port` 这类参数漏了值，脚本现在会直接给出友好的报错，而不是抛出 shell 变量错误。
 
 ## 其它加密方法（含 SS2022）
 
@@ -156,6 +166,10 @@ curl -fsSL "https://raw.githubusercontent.com/Xiuyixx/Shadowsocks/main/uninstall
 - `--user <name>`
 - `--service <name>`
 - `--keep-user`
+
+说明：
+- 如果存在 `install-meta.json`，卸载脚本会优先读取它来自动识别安装信息。
+- 如果你显式传了上面的参数，**显式参数优先**，会覆盖 metadata 中的值。
 
 ## License
 
