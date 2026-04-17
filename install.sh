@@ -36,7 +36,7 @@ UPGRADE BEHAVIOR
     values so an upgrade keeps your current node settings.
 
 NOTES
-  - Debian/Ubuntu supported (apt).
+  - Debian/Ubuntu, CentOS/RHEL/Rocky/AlmaLinux/Fedora supported.
   - This script creates/updates a systemd service: shadowsocks-server.service
 EOF
 }
@@ -60,16 +60,21 @@ require_root() {
   fi
 }
 
-apt_install_deps() {
-  if [[ ! -f /etc/debian_version ]]; then
-    die "Unsupported OS. This installer currently supports Debian/Ubuntu (apt)."
-  fi
-  export DEBIAN_FRONTEND=noninteractive
-
+install_deps() {
   log_info "正在安装依赖..."
-  # Keep output quiet for readability; apt errors still show on stderr.
-  apt-get update -y >/dev/null
-  apt-get install -y --no-install-recommends ca-certificates curl iproute2 jq openssl xz-utils >/dev/null
+
+  if [[ -f /etc/debian_version ]]; then
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update -y >/dev/null
+    apt-get install -y --no-install-recommends ca-certificates curl iproute2 jq openssl xz-utils >/dev/null
+  elif command -v dnf >/dev/null 2>&1; then
+    dnf -y install ca-certificates curl iproute jq openssl xz >/dev/null
+  elif command -v yum >/dev/null 2>&1; then
+    yum -y install ca-certificates curl iproute jq openssl xz >/dev/null
+  else
+    die "Unsupported OS. This installer supports Debian/Ubuntu (apt) and CentOS/RHEL/Fedora (dnf/yum)."
+  fi
+
   log_ok "依赖安装完成"
 }
 
@@ -362,7 +367,7 @@ main() {
   require_root
   need_cmd uname
 
-  apt_install_deps
+  install_deps
   need_cmd curl
   need_cmd jq
   need_cmd systemctl
@@ -540,10 +545,14 @@ main() {
 
   public_ip=""
   if command -v curl >/dev/null 2>&1; then
-    public_ip="$(curl -fsSL --max-time 5 https://api.ipify.org 2>/dev/null || true)"
-    if [[ -z "$public_ip" ]]; then
-      public_ip="$(curl -fsSL --max-time 5 https://ifconfig.me/ip 2>/dev/null || true)"
-    fi
+    local ip_source
+    for ip_source in "https://api.ipify.org" "https://ifconfig.me/ip" "https://icanhazip.com" "https://ipinfo.io/ip"; do
+      public_ip="$(curl -fsSL --max-time 5 "$ip_source" 2>/dev/null || true)"
+      # 去除可能的空白/换行
+      public_ip="$(echo "$public_ip" | tr -d '[:space:]')"
+      [[ -n "$public_ip" && "$public_ip" =~ ^[0-9a-fA-F.:]+$ ]] && break
+      public_ip=""
+    done
   fi
 
   ip_fallback="<YOUR_SERVER_IP>"

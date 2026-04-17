@@ -121,6 +121,19 @@ UNIT_PATH="/etc/systemd/system/${SERVICE_NAME}"
 log_info "=== 开始卸载 Shadowsocks（shadowsocks-rust）==="
 log_info "service=${SERVICE_NAME}, bin=${BIN_PATH}, configDir=${CONFIG_DIR}, user=${SS_USER}"
 
+echo
+log_warn "此操作将停止服务并删除以下内容："
+echo "  - systemd 服务：${SERVICE_NAME}"
+echo "  - 二进制：${BIN_PATH}"
+echo "  - 配置目录：${CONFIG_DIR}"
+[[ "$KEEP_USER" == "0" ]] && echo "  - 系统用户：${SS_USER}"
+echo
+read -rp "确认卸载？[y/N]: " _confirm
+if [[ ! "$_confirm" =~ ^[Yy]$ ]]; then
+  log_info "已取消卸载。"
+  exit 0
+fi
+
 if command -v systemctl >/dev/null 2>&1; then
   log_info "停止并禁用服务：${SERVICE_NAME}"
   systemctl disable --now "$SERVICE_NAME" >/dev/null 2>&1 || true

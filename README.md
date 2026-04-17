@@ -13,6 +13,7 @@
 ## 支持系统
 
 - Debian / Ubuntu（使用 `apt`）
+- CentOS / RHEL / Rocky / AlmaLinux / Fedora（使用 `dnf` / `yum`）
 - 架构：`x86_64`、`aarch64`
 - 初始化：`systemd`
 
