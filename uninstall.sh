@@ -57,6 +57,7 @@ case "$choice" in
       rm -f "$BIN_PATH" "$TARGET_BIN"
       rm -rf "$INSTALL_DIR"
       userdel "$RUN_USER" >/dev/null 2>&1 || true
+      groupdel "$RUN_USER" >/dev/null 2>&1 || true
       echo "[成功] 已完成完全卸载。"
     else
       echo "[信息] 已取消。"

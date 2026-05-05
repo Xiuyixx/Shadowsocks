@@ -6,9 +6,7 @@ APP_VERSION="1.0.0"
 CONFIG_BASE="/etc/shadowsocks"
 BIN_PATH="/usr/local/bin/ssserver"
 SERVICE_PREFIX="ss-node"
-META_BASE="/etc/shadowsocks"
 RUN_USER="shadowsocks"
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -49,8 +47,8 @@ check_cmd() {
 }
 
 require_root() {
-  if [[ -n "$SUDO" ]]; then
-    error "请使用 root 运行，或通过 sudo 执行 ss。"
+  if [[ -n "$SUDO" ]] && ! check_cmd sudo; then
+    error "请使用 root 运行，或安装 sudo 后再执行 ss。"
     return 1
   fi
 }
@@ -73,6 +71,10 @@ get_arch() {
 github_api() {
   local url="$1"
   curl -fsSL \
+    --connect-timeout 5 \
+    --max-time 20 \
+    --retry 3 \
+    --retry-delay 1 \
     -H 'Accept: application/vnd.github+json' \
     -H 'X-GitHub-Api-Version: 2022-11-28' \
     -H 'User-Agent: Shadowsocks-X' \
@@ -113,10 +115,14 @@ ensure_runtime_dependencies() {
 }
 
 ensure_run_user() {
+  if ! getent group "$RUN_USER" >/dev/null 2>&1; then
+    ${SUDO} groupadd --system "$RUN_USER" >/dev/null 2>&1 || true
+  fi
+
   if ! id -u "$RUN_USER" >/dev/null 2>&1; then
     note "正在创建系统用户：$RUN_USER"
-    ${SUDO} useradd --system --no-create-home --shell /usr/sbin/nologin "$RUN_USER" 2>/dev/null \
-      || ${SUDO} useradd --system --no-create-home --shell /sbin/nologin "$RUN_USER"
+    ${SUDO} useradd --system --no-create-home --shell /usr/sbin/nologin --gid "$RUN_USER" "$RUN_USER" 2>/dev/null \
+      || ${SUDO} useradd --system --no-create-home --shell /sbin/nologin --gid "$RUN_USER" "$RUN_USER"
   fi
 }
 
@@ -141,6 +147,7 @@ validate_ss2022_password() {
   local method="$1"
   local password="$2"
   local required_bytes=0
+  local padded
   local decoded_len
 
   case "$method" in
@@ -149,8 +156,22 @@ validate_ss2022_password() {
     *) return 0 ;;
   esac
 
-  decoded_len="$(printf '%s' "$password" | base64 -d 2>/dev/null | wc -c | tr -d ' ')"
+  [[ "$password" =~ ^[A-Za-z0-9+/]+={0,2}$ || "$password" =~ ^[A-Za-z0-9+/]+$ ]] || return 1
+  padded="$(pad_base64 "$password")" || return 1
+  decoded_len="$(printf '%s' "$padded" | base64 -d 2>/dev/null | wc -c | tr -d ' ')"
   [[ "$decoded_len" == "$required_bytes" ]]
+}
+
+pad_base64() {
+  local value="$1"
+  local remainder=$(( ${#value} % 4 ))
+
+  case "$remainder" in
+    0) printf '%s' "$value" ;;
+    2) printf '%s==' "$value" ;;
+    3) printf '%s=' "$value" ;;
+    *) return 1 ;;
+  esac
 }
 
 generate_password() {
@@ -164,18 +185,22 @@ generate_password() {
 
 port_in_use() {
   local port="$1"
-  ss -lntu 2>/dev/null | awk 'NR>1{print $5}' | grep -Eq "(^|:)$port$"
+  ss -H -lntu 2>/dev/null | awk '{print $5}' | grep -Eq "(^|:)$port$"
 }
 
 random_free_port() {
-  local port
-  while true; do
-    port="$(awk 'BEGIN{srand(); print int(10000+rand()*50000)}')"
+  local port attempt=0
+  while (( attempt < 200 )); do
+    port="$((10000 + (0x$(openssl rand -hex 4) % 50001)))"
     if ! port_in_use "$port"; then
       echo "$port"
       return 0
     fi
+    ((attempt++))
   done
+
+  error "随机端口分配失败，请手动指定端口。"
+  return 1
 }
 
 node_dir() {
@@ -242,6 +267,7 @@ get_public_ip() {
       return 0
     fi
   done
+  warn "公网 IP 获取失败，请手动确认服务器地址。"
   echo "<YOUR_SERVER_IP>"
 }
 
@@ -256,8 +282,10 @@ generate_ss_link() {
   local port="$4"
   local name="$5"
   local userinfo
+  local encoded_name
   userinfo="$(base64_url "${method}:${password}")"
-  echo "ss://${userinfo}@${host}:${port}#${name}"
+  encoded_name="$(jq -nr --arg v "$name" '$v|@uri')"
+  echo "ss://${userinfo}@${host}:${port}#${encoded_name}"
 }
 
 write_node_config() {
@@ -433,7 +461,7 @@ install_or_upgrade() {
 
 show_node_row() {
   local name="$1"
-  local NODE_NAME NODE_PORT NODE_PASSWORD NODE_METHOD NODE_MODE
+  local NODE_PORT NODE_PASSWORD NODE_METHOD NODE_MODE
   if ! load_node_meta "$name"; then
     warn "节点 $name 元数据缺失，已跳过。"
     return 0
@@ -504,9 +532,9 @@ choose_port() {
         ;;
       2)
         while true; do
-          read -rp "请输入端口（1-65535）: " port
+          read -rp "请输入端口（10000-60000）: " port
           [[ "$port" =~ ^[0-9]+$ ]] || { echo "端口必须是数字。" >&2; continue; }
-          (( port >= 1 && port <= 65535 )) || { echo "端口超出范围。" >&2; continue; }
+          (( port >= 10000 && port <= 60000 )) || { echo "端口超出范围。" >&2; continue; }
           if port_in_use "$port"; then
             echo "端口 $port 已被占用，请重新输入。" >&2
             continue
@@ -602,7 +630,7 @@ select_node_interactive() {
 
 add_node() {
   local name method port password mode public_ip link
-  local NODE_NAME NODE_PORT NODE_PASSWORD NODE_METHOD NODE_MODE
+  local NODE_PORT NODE_PASSWORD NODE_METHOD NODE_MODE
 
   [[ -x "$BIN_PATH" ]] || {
     error "未检测到 ssserver，请先执行 [1) 安装 / 升级 ssserver]。"
@@ -637,8 +665,14 @@ add_node() {
   write_node_config "$name" "$port" "$password" "$method" "$mode"
   write_node_service "$name"
 
-  ${SUDO} systemctl daemon-reload
-  ${SUDO} systemctl enable --now "$(service_name "$name")"
+  if ! ${SUDO} systemctl daemon-reload; then
+    error "systemctl daemon-reload 失败。"
+    return 1
+  fi
+  if ! ${SUDO} systemctl enable --now "$(service_name "$name")"; then
+    error "节点 $name 启动失败，请检查配置或日志。"
+    return 1
+  fi
 
   public_ip="$(get_public_ip)"
   link="$(generate_ss_link "$method" "$password" "$public_ip" "$port" "$name")"
@@ -666,13 +700,13 @@ delete_node() {
   ${SUDO} systemctl disable --now "$(service_name "$name")" >/dev/null 2>&1 || true
   ${SUDO} rm -f "$(service_unit_path "$name")"
   ${SUDO} rm -rf "$(node_dir "$name")"
-  ${SUDO} systemctl daemon-reload
+  ${SUDO} systemctl daemon-reload >/dev/null 2>&1 || true
   info "节点 $name 已删除。"
 }
 
 show_node_details() {
   local name public_ip link
-  local NODE_NAME NODE_PORT NODE_PASSWORD NODE_METHOD NODE_MODE
+  local NODE_PORT NODE_PASSWORD NODE_METHOD NODE_MODE
 
   echo "请选择要查看的节点："
   name="$(select_node_interactive "输入编号: ")" || return 1
@@ -706,16 +740,28 @@ control_node() {
 
   case "$action" in
     1)
-      ${SUDO} systemctl start "$(service_name "$name")"
-      info "节点 $name 已启动。"
+      if ${SUDO} systemctl start "$(service_name "$name")"; then
+        info "节点 $name 已启动。"
+      else
+        error "节点 $name 启动失败。"
+        return 1
+      fi
       ;;
     2)
-      ${SUDO} systemctl stop "$(service_name "$name")"
-      info "节点 $name 已停止。"
+      if ${SUDO} systemctl stop "$(service_name "$name")"; then
+        info "节点 $name 已停止。"
+      else
+        error "节点 $name 停止失败。"
+        return 1
+      fi
       ;;
     3)
-      ${SUDO} systemctl restart "$(service_name "$name")"
-      info "节点 $name 已重启。"
+      if ${SUDO} systemctl restart "$(service_name "$name")"; then
+        info "节点 $name 已重启。"
+      else
+        error "节点 $name 重启失败。"
+        return 1
+      fi
       ;;
     *)
       warn "无效输入。"
@@ -751,7 +797,7 @@ node_menu() {
 
 service_status() {
   local nodes=()
-  local node NODE_NAME NODE_PORT NODE_PASSWORD NODE_METHOD NODE_MODE listen_state active_state
+  local node NODE_PORT NODE_PASSWORD NODE_METHOD NODE_MODE listen_state active_state
   mapfile -t nodes < <(list_nodes)
 
   if [[ ${#nodes[@]} -eq 0 ]]; then
@@ -771,7 +817,7 @@ service_status() {
       active_state="inactive"
     fi
 
-    if ss -lntu 2>/dev/null | awk 'NR>1{print $5}' | grep -Eq "(^|:)$NODE_PORT$"; then
+    if ss -H -lntu 2>/dev/null | awk '{print $5}' | grep -Eq "(^|:)$NODE_PORT$"; then
       listen_state="listening"
     else
       listen_state="closed"
@@ -789,7 +835,7 @@ uninstall_all_nodes() {
     ${SUDO} rm -f "$(service_unit_path "$node")"
   done
   ${SUDO} rm -rf "$CONFIG_BASE"
-  ${SUDO} systemctl daemon-reload
+  ${SUDO} systemctl daemon-reload >/dev/null 2>&1 || true
 }
 
 uninstall_menu() {

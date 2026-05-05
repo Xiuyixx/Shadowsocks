@@ -11,6 +11,11 @@ if [[ ${EUID:-$(id -u)} -ne 0 ]]; then
   SUDO="sudo"
 fi
 
+if [[ ${EUID:-$(id -u)} -ne 0 ]] && ! command -v sudo >/dev/null 2>&1; then
+  echo "[ERROR] 需要 root 权限或可用的 sudo。请使用 root 运行，或先安装 sudo。"
+  exit 1
+fi
+
 confirm() {
   local prompt="$1"
   read -rp "${prompt} [y/N]: " ans
