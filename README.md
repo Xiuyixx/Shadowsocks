@@ -1,6 +1,6 @@
 # Shadowsocks-X
 
-一个交互式的 Shadowsocks 管理工具，风格参考 Nginx-X，适合在服务器上用菜单方式完成 `ssserver` 安装、节点创建、状态查看和卸载。
+一个交互式的 Shadowsocks 管理工具，适合在服务器上用菜单方式完成 `ssserver` 安装、节点创建、状态查看和卸载。
 
 ## 功能特性
 
