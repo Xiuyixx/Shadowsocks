@@ -102,12 +102,12 @@ ensure_runtime_dependencies() {
 
   note "正在安装依赖：${missing[*]}"
   if check_cmd apt-get; then
-    ${SUDO} apt-get update
-    ${SUDO} apt-get install -y curl tar systemd openssl iproute2 coreutils jq
+    ${SUDO} apt-get update -y
+    ${SUDO} apt-get install -y curl tar xz-utils systemd openssl iproute2 coreutils jq
   elif check_cmd dnf; then
-    ${SUDO} dnf install -y curl tar systemd openssl iproute coreutils jq
+    ${SUDO} dnf install -y curl tar xz systemd openssl iproute coreutils jq
   elif check_cmd yum; then
-    ${SUDO} yum install -y curl tar systemd openssl iproute coreutils jq
+    ${SUDO} yum install -y curl tar xz systemd openssl iproute coreutils jq
   else
     error "无法自动安装依赖，请手动安装：${missing[*]}"
     return 1
@@ -418,7 +418,7 @@ download_and_install_ssserver() {
   if [[ -n "$sha_url" ]]; then
     sha_file="$tmp_dir/${tar_name}.sha256"
     if curl -fsSL "$sha_url" -o "$sha_file"; then
-      expected="$(awk -v n="$tar_name" '$2 == n || $2 == "*" n || $2 == "./" n {print $1; exit}' "$sha_file")"
+      expected="$(awk -v n="$tar_name" '$2==n || $2=="*"n || $2=="./"n || $NF==n {print $1; exit}' "$sha_file")"
       if [[ -n "$expected" ]]; then
         actual="$(sha256sum "$tmp_dir/$tar_name" | awk '{print $1}')"
         if [[ "$expected" != "$actual" ]]; then
