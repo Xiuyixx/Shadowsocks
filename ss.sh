@@ -716,10 +716,10 @@ delete_node() {
 }
 
 show_node_details() {
-  local name public_ip link
+  local name public_ip link choice
   local NODE_PORT NODE_PASSWORD NODE_METHOD NODE_MODE
 
-  echo "请选择要查看的节点："
+  echo "请选择节点："
   name="$(select_node_interactive "输入编号: ")" || return 1
   load_node_meta "$name" || {
     error "读取节点元数据失败。"
@@ -729,6 +729,7 @@ show_node_details() {
   public_ip="$(get_public_ip)"
   link="$(generate_ss_link "$NODE_METHOD" "$NODE_PASSWORD" "$public_ip" "$NODE_PORT" "$name")"
 
+  echo
   echo "节点名称：$name"
   echo "服务器地址：$public_ip"
   echo "端口：$NODE_PORT"
@@ -737,6 +738,117 @@ show_node_details() {
   echo "传输模式：$(mode_to_label "$NODE_MODE")"
   echo "服务状态：$(service_state "$name")"
   echo "SS链接：$link"
+  echo
+  echo "----------------------------------------"
+  echo "  1) 修改节点"
+  echo "  2) 删除节点"
+  echo "  0) 返回"
+  echo "----------------------------------------"
+  read -rp "请选择: " choice
+  case "$choice" in
+    1) edit_node "$name" ;;
+    2)
+      if confirm "确认删除节点 $name 吗？"; then
+        ${SUDO} systemctl disable --now "$(service_name "$name")" >/dev/null 2>&1 || true
+        ${SUDO} rm -f "$(service_unit_path "$name")"
+        ${SUDO} rm -rf "$(node_dir "$name")"
+        ${SUDO} systemctl daemon-reload >/dev/null 2>&1 || true
+        info "节点 $name 已删除。"
+      else
+        info "已取消。"
+      fi
+      ;;
+    0) return 0 ;;
+    *) warn "无效输入。" ;;
+  esac
+}
+
+edit_node() {
+  local name="$1"
+  local NODE_PORT NODE_PASSWORD NODE_METHOD NODE_MODE
+  load_node_meta "$name" || {
+    error "读取节点元数据失败。"
+    return 1
+  }
+
+  echo
+  echo "修改节点 [$name]（直接回车保持不变）"
+  echo "----------------------------------------"
+
+  # 加密方式
+  echo "当前加密方式：$NODE_METHOD"
+  echo "  0) 保持不变"
+  local new_method method_choice
+  new_method="$NODE_METHOD"
+  read -rp "是否修改加密方式？[y/N]: " method_choice
+  if [[ "$method_choice" =~ ^[Yy]$ ]]; then
+    new_method="$(choose_method)" || new_method="$NODE_METHOD"
+    [[ -z "$new_method" ]] && new_method="$NODE_METHOD"
+  fi
+
+  # 端口
+  local new_port
+  echo "当前端口：$NODE_PORT"
+  while true; do
+    read -rp "请输入新端口（1-65535，回车保持不变）: " new_port
+    [[ -z "$new_port" ]] && new_port="$NODE_PORT" && break
+    [[ "$new_port" =~ ^[0-9]+$ ]] || { warn "请输入数字。"; continue; }
+    (( new_port >= 1 && new_port <= 65535 )) || { warn "端口超出范围（1-65535）。"; continue; }
+    if [[ "$new_port" != "$NODE_PORT" ]] && port_in_use "$new_port"; then
+      warn "端口 $new_port 已被占用，请重新输入。"
+      continue
+    fi
+    break
+  done
+
+  # 密码
+  local new_password
+  echo "当前密码：$NODE_PASSWORD"
+  echo "密码设置："
+  echo "  1) 自动生成新密码"
+  echo "  2) 手动输入新密码"
+  echo "  0) 保持不变"
+  read -rp "请选择 [0-2]: " pw_choice
+  case "$pw_choice" in
+    1) new_password="$(generate_password "$new_method")" ;;
+    2)
+      while true; do
+        read -rp "请输入新密码: " new_password
+        [[ -n "$new_password" ]] && break
+        warn "密码不能为空。"
+      done
+      ;;
+    *) new_password="$NODE_PASSWORD" ;;
+  esac
+
+  # 传输模式
+  local new_mode
+  echo "当前传输模式：$(mode_to_label "$NODE_MODE")"
+  echo "传输模式："
+  echo "  1) TCP + UDP"
+  echo "  2) 仅 TCP"
+  echo "  3) 仅 UDP"
+  echo "  0) 保持不变"
+  read -rp "请选择 [0-3]: " mode_choice
+  case "$mode_choice" in
+    1) new_mode="tcp_and_udp" ;;
+    2) new_mode="tcp_only" ;;
+    3) new_mode="udp_only" ;;
+    *) new_mode="$NODE_MODE" ;;
+  esac
+
+  # 确认并应用
+  echo
+  echo "将更新为：加密=$new_method 端口=$new_port 密码=$new_password 模式=$(mode_to_label "$new_mode")"
+  confirm "确认修改？" || { info "已取消。"; return 0; }
+
+  write_node_config "$name" "$new_port" "$new_password" "$new_method" "$new_mode"
+  ${SUDO} systemctl daemon-reload >/dev/null 2>&1 || true
+  if systemctl is-active --quiet "$(service_name "$name")"; then
+    ${SUDO} systemctl restart "$(service_name "$name")" && info "节点 $name 已更新并重启。" || error "重启失败，请手动检查。"
+  else
+    info "节点 $name 配置已更新（服务未运行，不自动启动）。"
+  fi
 }
 
 control_node() {
@@ -786,20 +898,18 @@ node_menu() {
     echo "节点管理"
     echo "========================================"
     echo "1) 新增节点"
-    echo "2) 删除节点"
-    echo "3) 查看节点详情"
-    echo "4) 启动 / 停止 / 重启节点"
+    echo "2) 查看节点详情"
+    echo "3) 启动 / 停止 / 重启节点"
     echo "0) 返回主菜单"
     echo "========================================"
     read -rp "请选择功能: " choice
 
     case "$choice" in
       1) run_menu_action add_node; pause ;;
-      2) run_menu_action delete_node; pause ;;
-      3) run_menu_action show_node_details; pause ;;
-      4) run_menu_action control_node; pause ;;
+      2) run_menu_action show_node_details; pause ;;
+      3) run_menu_action control_node; pause ;;
       0) return 0 ;;
-      *) warn "无效输入，请输入 0-4。"; pause ;;
+      *) warn "无效输入，请输入 0-3。"; pause ;;
     esac
   done
 }
