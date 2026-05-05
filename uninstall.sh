@@ -14,6 +14,7 @@ OPTIONS
       --user <name>          Override service user (default: auto-detect, fallback shadowsocks)
       --service <name>       Override service name (default: auto-detect, fallback shadowsocks-server.service)
       --keep-user            Do not delete the service user
+      --yes, -y              Skip interactive confirmation (required when stdin is not a TTY)
   -h, --help                 Show help
 
 NOTES
@@ -39,6 +40,7 @@ CONFIG_DIR=""
 SS_USER=""
 SERVICE_NAME=""
 KEEP_USER="0"
+FORCE_YES="0"   # set by --yes to skip interactive confirmation
 
 EXPLICIT_BIN_PATH="0"
 EXPLICIT_CONFIG_DIR="0"
@@ -72,6 +74,7 @@ while [[ $# -gt 0 ]]; do
       shift 2
       ;;
     --keep-user) KEEP_USER="1"; shift 1 ;;
+    --yes|-y) FORCE_YES="1"; shift 1 ;;
     -h|--help) usage; exit 0 ;;
     *) die "Unknown option: $1 (use --help)" ;;
   esac
@@ -128,10 +131,17 @@ echo "  - 二进制：${BIN_PATH}"
 echo "  - 配置目录：${CONFIG_DIR}"
 [[ "$KEEP_USER" == "0" ]] && echo "  - 系统用户：${SS_USER}"
 echo
-read -rp "确认卸载？[y/N]: " _confirm
-if [[ ! "$_confirm" =~ ^[Yy]$ ]]; then
-  log_info "已取消卸载。"
-  exit 0
+
+if [[ "$FORCE_YES" == "1" ]]; then
+  log_info "检测到 --yes 参数，跳过交互确认。"
+elif [[ ! -t 0 ]]; then
+  die "非交互式环境（stdin 不是终端），无法读取确认输入。\n如需非交互卸载，请使用 --yes 参数：bash uninstall.sh --yes"
+else
+  read -rp "确认卸载？[y/N]: " _confirm
+  if [[ ! "$_confirm" =~ ^[Yy]$ ]]; then
+    log_info "已取消卸载。"
+    exit 0
+  fi
 fi
 
 if command -v systemctl >/dev/null 2>&1; then

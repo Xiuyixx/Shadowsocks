@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-SCRIPT_VERSION="2026-05-05"
+SCRIPT_VERSION="2026-05-05-3"
 INSTALL_META_VERSION="1"
 
 usage() {
@@ -130,19 +130,18 @@ maybe_verify_sha256_from_release() {
     return 0
   fi
 
-  local tmp_sha tmp_one
+  local tmp_sha
   tmp_sha="$(mktemp)"
-  tmp_one="$(mktemp)"
 
   if ! curl -fsSL -sS "$sha_url" -o "$tmp_sha"; then
     log_warn "下载 sha256 文件失败，继续安装但不做校验"
-    rm -f "$tmp_sha" "$tmp_one"
+    rm -f "$tmp_sha"
     return 0
   fi
 
   if ! command -v sha256sum >/dev/null 2>&1; then
     log_warn "系统缺少 sha256sum，无法校验"
-    rm -f "$tmp_sha" "$tmp_one"
+    rm -f "$tmp_sha"
     return 0
   fi
 
@@ -157,7 +156,7 @@ maybe_verify_sha256_from_release() {
 
   if [[ -z "$expected" ]]; then
     log_warn "sha256 文件中未找到 ${tar_name} 的条目，继续安装但不做校验"
-    rm -f "$tmp_sha" "$tmp_one"
+    rm -f "$tmp_sha"
     return 0
   fi
 
@@ -166,12 +165,12 @@ maybe_verify_sha256_from_release() {
     log_warn "sha256 校验失败：${tar_name}"
     echo "    expected: ${expected}" >&2
     echo "    actual:   ${actual}" >&2
-    rm -f "$tmp_sha" "$tmp_one"
+    rm -f "$tmp_sha"
     exit 1
   fi
 
   log_ok "sha256 校验通过"
-  rm -f "$tmp_sha" "$tmp_one"
+  rm -f "$tmp_sha"
 }
 
 ensure_user() {
@@ -182,7 +181,7 @@ ensure_user() {
 }
 
 write_config() {
-  local config_path="$1" port="$2" password="$3" method="$4" mode="$5" user="$6"
+  local config_path="$1" port="$2" password="$3" method="$4" mode="$5" user="$6" fast_open="${7:-false}"
 
   need_cmd jq
 
@@ -194,22 +193,13 @@ write_config() {
   # Some versions expect `server` to be a string (not an array).
   # Bind to "::" (dual-stack) so IPv6 clients can connect; shadowsocks-rust
   # falls back gracefully when IPv6 is unavailable at runtime.
-
-  # Auto-detect TCP Fast Open support (kernel >= 4.11, /proc knob value >= 2).
-  local tfo_val
-  tfo_val="$(cat /proc/sys/net/ipv4/tcp_fastopen 2>/dev/null || echo 0)"
-  local enable_fast_open=false
-  if (( tfo_val >= 2 )); then
-    enable_fast_open=true
-  fi
-
   jq -n \
     --arg server "::" \
     --argjson server_port "$port" \
     --arg password "$password" \
     --arg method "$method" \
     --argjson timeout 300 \
-    --argjson fast_open "$enable_fast_open" \
+    --argjson fast_open "$fast_open" \
     --arg nameserver "1.1.1.1" \
     --arg mode "$mode" \
     '{
@@ -228,11 +218,11 @@ write_config() {
 }
 
 write_systemd_unit() {
-  local unit_path="$1" ss_bin="$2" config_path="$3" config_dir="$4" user="$5"
+  local unit_path="$1" ss_bin="$2" config_path="$3" config_dir="$4" user="$5" ss_version="$6"
 
   cat > "$unit_path" <<EOF
 [Unit]
-Description=Shadowsocks (shadowsocks-rust) Server
+Description=Shadowsocks (shadowsocks-rust) Server ${ss_version}
 After=network-online.target
 Wants=network-online.target
 
@@ -264,6 +254,8 @@ RestrictSUIDSGID=true
 RestrictRealtime=true
 RestrictNamespaces=true
 SystemCallArchitectures=native
+CapabilityBoundingSet=
+AmbientCapabilities=
 
 [Install]
 WantedBy=multi-user.target
@@ -311,14 +303,17 @@ cleanup_tmp() {
 
 port_is_listening() {
   local port="$1"
+  # Match both IPv4 (:PORT) and IPv6 (:::PORT or *:PORT) listen entries.
+  # ss/netstat formats: "0.0.0.0:PORT", ":::PORT", "*:PORT"
+  local pattern="(0\.0\.0\.0|\*|::):${port}([^0-9]|$)"
 
   if command -v ss >/dev/null 2>&1; then
-    ss -lntup 2>/dev/null | grep -Eq ":${port}\\b"
+    ss -lntup 2>/dev/null | grep -Eq "${pattern}"
     return $?
   fi
 
   if command -v netstat >/dev/null 2>&1; then
-    netstat -lntup 2>/dev/null | grep -Eq ":${port}[[:space:]]"
+    netstat -lntup 2>/dev/null | grep -Eq "${pattern}"
     return $?
   fi
 
@@ -442,6 +437,16 @@ main() {
   local ss_arch
   ss_arch="$(get_arch)"
 
+  # Auto-detect TCP Fast Open support (kernel >= 4.11, /proc knob value >= 2).
+  # Detect here in main() so write_config receives it as a plain argument.
+  local tfo_val fast_open
+  tfo_val="$(cat /proc/sys/net/ipv4/tcp_fastopen 2>/dev/null || echo 0)"
+  fast_open=false
+  if (( tfo_val >= 2 )); then
+    fast_open=true
+    log_info "TCP Fast Open 已启用（内核支持，/proc/sys/net/ipv4/tcp_fastopen=${tfo_val}）"
+  fi
+
   log_info "步骤 1/3：获取 shadowsocks-rust 版本信息..."
   if [[ "$version" == "latest" ]]; then
     version="$(get_latest_version)"
@@ -485,7 +490,7 @@ main() {
   chown root:"$user" "$config_dir"
 
   local config_path="${config_dir%/}/config.json"
-  write_config "$config_path" "$port" "$password" "$method" "$mode" "$user"
+  write_config "$config_path" "$port" "$password" "$method" "$mode" "$user" "$fast_open"
 
   if [[ ! -s "$config_path" ]]; then
     die "配置文件写入失败或为空：${config_path}"
@@ -518,7 +523,7 @@ main() {
 
   local service_name="shadowsocks-server.service"
   local unit_path="/etc/systemd/system/${service_name}"
-  write_systemd_unit "$unit_path" "$ss_bin" "$config_path" "$config_dir" "$user"
+  write_systemd_unit "$unit_path" "$ss_bin" "$config_path" "$config_dir" "$user" "$version"
 
   systemctl daemon-reload
   systemctl enable "$service_name" >/dev/null
@@ -603,7 +608,10 @@ main() {
   local ss_link=""
   if command -v base64 >/dev/null 2>&1; then
     local userinfo_b64
+    # SS URI spec uses base64url (RFC 4648 §5): replace + with - and / with _
     userinfo_b64="$(printf '%s' "${method}:${password}" | base64 -w 0 2>/dev/null || printf '%s' "${method}:${password}" | base64 2>/dev/null | tr -d '\n')"
+    userinfo_b64="${userinfo_b64//+/-}"
+    userinfo_b64="${userinfo_b64//\//_}"
     if [[ -n "$userinfo_b64" ]]; then
       ss_link="ss://${userinfo_b64}@${ip_fallback}:${port}#${node_name}"
     fi
@@ -615,6 +623,10 @@ main() {
 
   echo "SS链接: ${ss_link}"
   echo "提示: 复制上面的 SS 链接导入客户端即可使用"
+
+  local ss_ver_str
+  ss_ver_str="$("$ss_bin" --version 2>&1 | head -1 || echo '未知')"
+  echo "ssserver 版本: ${ss_ver_str}"
 
   echo
   local firewall_proto="TCP"
