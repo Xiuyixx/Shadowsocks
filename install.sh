@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-SCRIPT_VERSION="2026-04-14"
+SCRIPT_VERSION="2026-05-05"
 INSTALL_META_VERSION="1"
 
 usage() {
@@ -192,13 +192,24 @@ write_config() {
 
   # NOTE: keep config format compatible across shadowsocks-rust versions.
   # Some versions expect `server` to be a string (not an array).
+  # Bind to "::" (dual-stack) so IPv6 clients can connect; shadowsocks-rust
+  # falls back gracefully when IPv6 is unavailable at runtime.
+
+  # Auto-detect TCP Fast Open support (kernel >= 4.11, /proc knob value >= 2).
+  local tfo_val
+  tfo_val="$(cat /proc/sys/net/ipv4/tcp_fastopen 2>/dev/null || echo 0)"
+  local enable_fast_open=false
+  if (( tfo_val >= 2 )); then
+    enable_fast_open=true
+  fi
+
   jq -n \
-    --arg server "0.0.0.0" \
+    --arg server "::" \
     --argjson server_port "$port" \
     --arg password "$password" \
     --arg method "$method" \
     --argjson timeout 300 \
-    --argjson fast_open false \
+    --argjson fast_open "$enable_fast_open" \
     --arg nameserver "1.1.1.1" \
     --arg mode "$mode" \
     '{
@@ -405,7 +416,23 @@ main() {
   fi
 
   if [[ "$method" == 2022-* ]]; then
-    log_info "检测到 SS2022 方法：${method}（建议 password 使用对应长度 key 的 base64）"
+    log_info "检测到 SS2022 方法：${method}，正在校验 password 格式..."
+    # Validate base64 password length for SS2022 methods.
+    # 2022-blake3-aes-128-gcm requires 16-byte key (base64 = 24 chars, no padding)
+    # 2022-blake3-aes-256-gcm / 2022-blake3-chacha20-poly1305 require 32-byte key (base64 = 44 chars)
+    local required_key_bytes=0
+    case "$method" in
+      2022-blake3-aes-128-gcm) required_key_bytes=16 ;;
+      2022-blake3-aes-256-gcm|2022-blake3-chacha20-poly1305) required_key_bytes=32 ;;
+    esac
+    if (( required_key_bytes > 0 )); then
+      local decoded_len
+      decoded_len="$(printf '%s' "$password" | base64 -d 2>/dev/null | wc -c || echo 0)"
+      if (( decoded_len != required_key_bytes )); then
+        die "SS2022 方法 ${method} 需要 ${required_key_bytes} 字节的 base64 key，但当前 password 解码后为 ${decoded_len} 字节。\n  生成建议：openssl rand -base64 ${required_key_bytes}"
+      fi
+      log_ok "SS2022 password 格式校验通过（${decoded_len} 字节）"
+    fi
   fi
 
   if [[ "$mode" != "tcp_and_udp" && "$mode" != "tcp_only" ]]; then
@@ -513,8 +540,9 @@ main() {
   log_ok "安装元数据已写入：${config_dir%/}/install-meta.json"
 
   # Verify the port is actually listening (service may exit quickly after start).
+  # Allow up to ~5 seconds (15 * 0.35s) for slower machines or first-run setups.
   local tries listen_result
-  tries=10
+  tries=15
   listen_result=1
   while (( tries > 0 )); do
     if port_is_listening "$port"; then
@@ -527,7 +555,7 @@ main() {
         break
       fi
     fi
-    sleep 0.3
+    sleep 0.35
     tries=$((tries - 1))
   done
 
@@ -558,6 +586,8 @@ main() {
   ip_fallback="<YOUR_SERVER_IP>"
   if [[ -n "$public_ip" ]]; then
     ip_fallback="$public_ip"
+  else
+    log_warn "无法自动获取公网 IP，SS 链接中的服务器地址将显示为 <YOUR_SERVER_IP>，请手动替换后再导入客户端。"
   fi
 
   echo
