@@ -831,8 +831,8 @@ edit_node() {
   echo "密码设置："
   echo "  1) 自动生成新密码"
   echo "  2) 手动输入新密码"
-  echo "  0) 保持不变"
-  read -rp "请选择 [0-2]: " pw_choice
+  echo "  回车保持不变"
+  read -rp "请选择 [1-2]：" pw_choice
   case "$pw_choice" in
     1) new_password="$(generate_password "$new_method")" ;;
     2)
@@ -852,8 +852,8 @@ edit_node() {
   echo "  1) TCP + UDP"
   echo "  2) 仅 TCP"
   echo "  3) 仅 UDP"
-  echo "  0) 保持不变"
-  read -rp "请选择 [0-3]: " mode_choice
+  echo "  回车保持不变"
+  read -rp "请选择 [1-3]：" mode_choice
   case "$mode_choice" in
     1) new_mode="tcp_and_udp" ;;
     2) new_mode="tcp_only" ;;
@@ -868,10 +868,10 @@ edit_node() {
 
   write_node_config "$name" "$new_port" "$new_password" "$new_method" "$new_mode"
   ${SUDO} systemctl daemon-reload >/dev/null 2>&1 || true
-  if systemctl is-active --quiet "$(service_name "$name")"; then
-    ${SUDO} systemctl restart "$(service_name "$name")" && info "节点 $name 已更新并重启。" || error "重启失败，请手动检查。"
+  if ${SUDO} systemctl restart "$(service_name "$name")" 2>/dev/null || ${SUDO} systemctl start "$(service_name "$name")"; then
+    info "节点 $name 配置已更新并已启动。"
   else
-    info "节点 $name 配置已更新（服务未运行，不自动启动）。"
+    error "启动失败，请手动检查。"
   fi
 }
 
