@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-SCRIPT_VERSION="2026-05-05-3"
+SCRIPT_VERSION="2026-05-05-4"
 INSTALL_META_VERSION="1"
 
 usage() {
@@ -22,7 +22,7 @@ OPTIONS
       --bin-dir <dir>       Install ssserver into (default: /usr/local/bin)
       --config-dir <dir>    Config dir (default: /etc/shadowsocks)
       --user <name>         Run service as this system user (default: shadowsocks)
-      --mode <mode>         Transport mode: tcp_and_udp | tcp_only (default: tcp_and_udp)
+      --mode <mode>         Transport mode: tcp_and_udp | tcp_only | udp_only (default: tcp_and_udp)
       --no-udp              Alias for --mode tcp_only
       --skip-sha256         Do not attempt sha256 verification
   -h, --help                Show help
@@ -90,15 +90,38 @@ get_arch() {
 
 github_api() {
   local url="$1"
-  curl -fsSL -sS \
+  curl -fsSL \
     -H 'Accept: application/vnd.github+json' \
     -H 'X-GitHub-Api-Version: 2022-11-28' \
     -H 'User-Agent: SSAes128gcm-installer' \
     "$url"
 }
 
+generate_password() {
+  local method="$1"
+
+  case "$method" in
+    2022-blake3-aes-128-gcm)
+      openssl rand -base64 16 | tr -d '=\n'
+      ;;
+    2022-blake3-aes-256-gcm)
+      openssl rand -base64 32 | tr -d '=\n'
+      ;;
+    *)
+      openssl rand -base64 24 | tr -d '\n'
+      ;;
+  esac
+}
+
 get_latest_version() {
-  github_api "https://api.github.com/repos/shadowsocks/shadowsocks-rust/releases/latest" | jq -r .tag_name
+  local latest_version
+  latest_version="$(github_api "https://api.github.com/repos/shadowsocks/shadowsocks-rust/releases/latest" | jq -r .tag_name)"
+
+  if [[ -z "$latest_version" || "$latest_version" == "null" ]]; then
+    die "Failed to determine latest shadowsocks-rust version. This may be caused by GitHub API rate limiting or a network issue. Please retry later or specify a version manually with --version vX.Y.Z"
+  fi
+
+  printf '%s\n' "$latest_version"
 }
 
 get_release_by_tag() {
@@ -249,6 +272,7 @@ ProtectKernelTunables=true
 ProtectKernelModules=true
 ProtectKernelLogs=true
 LockPersonality=true
+# May conflict with some older shadowsocks-rust builds; disable if service fails to start
 MemoryDenyWriteExecute=true
 RestrictSUIDSGID=true
 RestrictRealtime=true
@@ -407,7 +431,7 @@ main() {
 
   if [[ -z "$password" ]]; then
     need_cmd openssl
-    password="$(openssl rand -base64 24 | tr -d '\n')"
+    password="$(generate_password "$method")"
   fi
 
   if [[ "$method" == 2022-* ]]; then
@@ -430,8 +454,8 @@ main() {
     fi
   fi
 
-  if [[ "$mode" != "tcp_and_udp" && "$mode" != "tcp_only" ]]; then
-    die "Invalid --mode: $mode (use tcp_and_udp or tcp_only)"
+  if [[ "$mode" != "tcp_and_udp" && "$mode" != "tcp_only" && "$mode" != "udp_only" ]]; then
+    die "Invalid --mode: $mode (use tcp_and_udp, tcp_only, or udp_only)"
   fi
 
   local ss_arch

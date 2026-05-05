@@ -178,4 +178,5 @@ else
 fi
 
 log_ok "卸载完成"
+log_info "提示：systemd 日志中的历史记录如需清理：journalctl --vacuum-time=1s --unit=${SERVICE_NAME}"
 log_warn "提示：如果你之前手动放行过端口（云安全组/防火墙），需要你自行回收规则。"

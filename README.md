@@ -21,13 +21,13 @@
 
 ### 安装最新版本（默认）
 
-推荐写法：
+推荐写法（带 nocache）：
 
 ```bash
 curl -fsSL "https://raw.githubusercontent.com/Xiuyixx/Shadowsocks/main/install.sh?nocache=$(date +%s)" | sudo bash
 ```
 
-兼容写法：
+备用写法（不带 nocache）：
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Xiuyixx/Shadowsocks/main/install.sh | sudo bash
@@ -79,7 +79,7 @@ bash install.sh --help
 - `--password` / `SS_PASSWORD`
 - `--method` / `SS_METHOD`（默认 `aes-128-gcm`）
 - `--version` / `SS_VERSION`（`latest` 或 `v1.22.0` 这种 tag）
-- `--mode`：传输模式（`tcp_and_udp` / `tcp_only`）
+- `--mode`：传输模式（`tcp_and_udp` / `tcp_only` / `udp_only`）
 - `--no-udp`：禁用 UDP（等价于 `--mode tcp_only`）
 
 说明：
