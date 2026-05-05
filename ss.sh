@@ -644,7 +644,7 @@ add_node() {
   local NODE_PORT NODE_PASSWORD NODE_METHOD NODE_MODE
 
   [[ -x "$BIN_PATH" ]] || {
-    error "未检测到 ssserver，请先执行 [1) 安装 / 升级 ssserver]。"
+    error "未检测到 ssserver，请先执行 [1) 安装 / 升级]。"
     return 1
   }
 
@@ -904,10 +904,9 @@ banner() {
 }
 
 main_menu() {
-  echo "1) 安装 / 升级 ssserver"
+  echo "1) 安装 / 升级"
   echo "2) 节点管理"
-  echo "3) 查看服务状态"
-  echo "4) 卸载"
+  echo "3) 卸载"
   echo "0) 退出"
   echo "========================================"
 }
@@ -924,10 +923,9 @@ main() {
     case "$choice" in
       1) run_menu_action install_or_upgrade; pause ;;
       2) node_menu ;;
-      3) run_menu_action service_status; pause ;;
-      4) uninstall_menu ;;
+      3) uninstall_menu ;;
       0) info "已退出 ${APP_NAME}。"; exit 0 ;;
-      *) warn "无效输入，请输入主菜单编号（0-4）。"; pause ;;
+      *) warn "无效输入，请输入主菜单编号（0-3）。"; pause ;;
     esac
   done
 }
