@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-SCRIPT_VERSION="2026-05-05-5"
+SCRIPT_VERSION="2026-05-05-6"
 INSTALL_META_VERSION="1"
 
 usage() {
@@ -100,15 +100,20 @@ github_api() {
 generate_password() {
   local method="$1"
 
+  # SS2022 methods require a fixed-length base64url key (no padding, no line breaks).
+  # Other methods use a random base64 string; padding is stripped for client compatibility.
   case "$method" in
     2022-blake3-aes-128-gcm)
+      # 16-byte key → 24 base64 chars (no padding)
       openssl rand -base64 16 | tr -d '=\n'
       ;;
-    2022-blake3-aes-256-gcm)
+    2022-blake3-aes-256-gcm|2022-blake3-chacha20-poly1305)
+      # 32-byte key → 44 base64 chars (no padding)
       openssl rand -base64 32 | tr -d '=\n'
       ;;
     *)
-      openssl rand -base64 24 | tr -d '\n'
+      # 24 random bytes → 32 base64 chars; strip padding for broad client compatibility
+      openssl rand -base64 24 | tr -d '=\n'
       ;;
   esac
 }
@@ -146,7 +151,7 @@ get_release_by_tag() {
 download_release_asset() {
   local url="$1" out="$2"
   # Quiet download (no progress), but still show errors.
-  curl -fL -sS --retry 3 --retry-delay 1 -o "$out" "$url"
+  curl -fL --retry 3 --retry-delay 1 -o "$out" "$url"
   # Fail fast on empty/truncated downloads.
   if [[ ! -s "$out" ]]; then
     die "Downloaded file is empty or missing: ${out} (URL: ${url}). Possible network interruption."
@@ -174,7 +179,7 @@ maybe_verify_sha256_from_release() {
   local tmp_sha
   tmp_sha="$(mktemp)"
 
-  if ! curl -fsSL -sS "$sha_url" -o "$tmp_sha"; then
+  if ! curl -fsSL "$sha_url" -o "$tmp_sha"; then
     log_warn "下载 sha256 文件失败，继续安装但不做校验"
     rm -f "$tmp_sha"
     return 0
@@ -289,7 +294,9 @@ ProtectKernelTunables=true
 ProtectKernelModules=true
 ProtectKernelLogs=true
 LockPersonality=true
-# May conflict with some older shadowsocks-rust builds; disable if service fails to start
+# MemoryDenyWriteExecute: may conflict with older shadowsocks-rust builds where the Rust
+# runtime uses writable+executable memory (JIT/stack markers). If the service fails to
+# start with "Operation not permitted" or signal 31 (SIGSYS), comment out this line.
 MemoryDenyWriteExecute=true
 RestrictSUIDSGID=true
 RestrictRealtime=true
@@ -390,6 +397,7 @@ main() {
   local user="shadowsocks"
   local mode=""
   local skip_sha256="0"
+  local dry_run="0"
 
   local explicit_port="0"
   local explicit_password="0"
@@ -412,6 +420,7 @@ main() {
       --mode) require_value "$1" "${2:-}"; mode="$2"; explicit_mode="1"; shift 2 ;;
       --no-udp) mode="tcp_only"; explicit_mode="1"; shift 1 ;;
       --skip-sha256) skip_sha256="1"; shift 1 ;;
+      --dry-run) dry_run="1"; shift 1 ;;
       -h|--help) usage; exit 0 ;;
       --) shift; break ;;
       *) die "Unknown option: $1 (use --help)" ;;
@@ -483,6 +492,23 @@ main() {
   if [[ "$mode" != "tcp_and_udp" && "$mode" != "tcp_only" && "$mode" != "udp_only" ]]; then
     die "Invalid --mode: $mode (use tcp_and_udp, tcp_only, or udp_only)"
   fi
+
+  # --dry-run: print resolved config and exit without making any changes.
+  if [[ "$dry_run" == "1" ]]; then
+    echo
+    echo "====== DRY RUN — 以下为将要应用的配置（不会实际安装）======"
+    echo "  port    : ${port}"
+    echo "  password: ${password}"
+    echo "  method  : ${method}"
+    echo "  mode    : ${mode}"
+    echo "  version : ${version}"
+    echo "  bin-dir : ${bin_dir}"
+    echo "  config  : ${config_dir%/}/config.json"
+    echo "  user    : ${user}"
+    echo "========================================================"
+    exit 0
+  fi
+
 
   local ss_arch
   ss_arch="$(get_arch)"
@@ -692,6 +718,8 @@ main() {
   local firewall_proto="TCP"
   if [[ "$mode" == "tcp_and_udp" ]]; then
     firewall_proto="TCP, UDP"
+  elif [[ "$mode" == "udp_only" ]]; then
+    firewall_proto="UDP"
   fi
   echo "Firewall/Security Group: allow ${firewall_proto} ${port}"
   log_ok "=== 一键安装完成 ==="

@@ -178,5 +178,13 @@ else
 fi
 
 log_ok "卸载完成"
-log_info "提示：systemd 日志中的历史记录如需清理：journalctl --vacuum-time=1s --unit=${SERVICE_NAME}"
-log_warn "提示：如果你之前手动放行过端口（云安全组/防火墙），需要你自行回收规则。"
+echo
+log_info "=== 残留项提示（请手动确认） ==="
+log_info "1. systemd 日志历史（如需清理）："
+log_info "     journalctl --vacuum-time=1s --unit=${SERVICE_NAME}"
+log_info "2. firewall/ufw 规则（脚本不会自动删除，请手动回收）："
+log_info "     ufw delete allow <port>/tcp"
+log_info "     ufw delete allow <port>/udp"
+log_info "     或在云厂商安全组控制台删除对应入站规则"
+log_info "3. 本次卸载不会清理 systemd journal 中已有的历史日志（journald 按时间/容量轮转）"
+log_warn "如果你之前手动放行过端口（云安全组/防火墙），需要你自行回收规则。"

@@ -21,17 +21,11 @@
 
 ### 安装最新版本（默认）
 
-推荐写法（带 nocache）：
-
 ```bash
 curl -fsSL "https://raw.githubusercontent.com/Xiuyixx/Shadowsocks/main/install.sh?nocache=$(date +%s)" | sudo bash
 ```
 
-备用写法（不带 nocache）：
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/Xiuyixx/Shadowsocks/main/install.sh | sudo bash
-```
+> 末尾 `?nocache=$(date +%s)` 用于绕过 CDN 缓存，确保拿到最新脚本。也可以省略直接用不带参数的写法，效果相同，但有极低概率读到缓存旧版本。
 
 ### 自定义端口与密码安装
 
@@ -81,6 +75,7 @@ bash install.sh --help
 - `--version` / `SS_VERSION`（`latest` 或 `v1.22.0` 这种 tag）
 - `--mode`：传输模式（`tcp_and_udp` / `tcp_only` / `udp_only`）
 - `--no-udp`：禁用 UDP（等价于 `--mode tcp_only`）
+- `--dry-run`：打印解析后的配置参数后退出，不做实际安装（适合 preview）
 
 说明：
 - `bash install.sh --help` 和 `bash uninstall.sh --help` 可直接查看帮助，不要求 root。
