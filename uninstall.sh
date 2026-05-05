@@ -27,7 +27,7 @@ log_info() { echo "[信息] $*"; }
 log_ok() { echo "[成功] $*"; }
 log_warn() { echo "[警告] $*" >&2; }
 
-die() { echo "[错误] $*" >&2; exit 1; }
+die() { printf '[错误] %s\n' "$*" >&2; exit 1; }
 require_value() {
   local opt="$1"
   if [[ $# -lt 2 || -z "${2:-}" ]]; then

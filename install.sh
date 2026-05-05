@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-SCRIPT_VERSION="2026-05-05-4"
+SCRIPT_VERSION="2026-05-05-5"
 INSTALL_META_VERSION="1"
 
 usage() {
@@ -45,7 +45,7 @@ log_info() { echo "[信息] $*"; }
 log_ok() { echo "[成功] $*"; }
 log_warn() { echo "[警告] $*" >&2; }
 
-die() { echo "[错误] $*" >&2; exit 1; }
+die() { printf '[错误] %s\n' "$*" >&2; exit 1; }
 need_cmd() { command -v "$1" >/dev/null 2>&1 || die "Missing command: $1"; }
 require_value() {
   local opt="$1"
@@ -114,11 +114,25 @@ generate_password() {
 }
 
 get_latest_version() {
-  local latest_version
-  latest_version="$(github_api "https://api.github.com/repos/shadowsocks/shadowsocks-rust/releases/latest" | jq -r .tag_name)"
+  local http_code response latest_version
+  # Capture both response body and HTTP status code in one request.
+  response="$(curl -fsSL \
+    -H 'Accept: application/vnd.github+json' \
+    -H 'X-GitHub-Api-Version: 2022-11-28' \
+    -H 'User-Agent: SSAes128gcm-installer' \
+    -w '\n__HTTP_CODE__:%{http_code}' \
+    "https://api.github.com/repos/shadowsocks/shadowsocks-rust/releases/latest" 2>/dev/null || true)"
+  http_code="$(printf '%s' "$response" | grep -o '__HTTP_CODE__:[0-9]*' | cut -d: -f2 || echo 0)"
+  response="$(printf '%s' "$response" | grep -v '__HTTP_CODE__:')"
+
+  if [[ "$http_code" == "429" || "$http_code" == "403" ]]; then
+    die "GitHub API rate limit exceeded (HTTP ${http_code}). Please wait a few minutes and retry, or specify a version manually with --version vX.Y.Z"
+  fi
+
+  latest_version="$(printf '%s' "$response" | jq -r .tag_name 2>/dev/null || true)"
 
   if [[ -z "$latest_version" || "$latest_version" == "null" ]]; then
-    die "Failed to determine latest shadowsocks-rust version. This may be caused by GitHub API rate limiting or a network issue. Please retry later or specify a version manually with --version vX.Y.Z"
+    die "Failed to determine latest shadowsocks-rust version (HTTP ${http_code:-unknown}). This may be caused by a network issue. Please retry later or specify a version manually with --version vX.Y.Z"
   fi
 
   printf '%s\n' "$latest_version"
@@ -133,6 +147,10 @@ download_release_asset() {
   local url="$1" out="$2"
   # Quiet download (no progress), but still show errors.
   curl -fL -sS --retry 3 --retry-delay 1 -o "$out" "$url"
+  # Fail fast on empty/truncated downloads.
+  if [[ ! -s "$out" ]]; then
+    die "Downloaded file is empty or missing: ${out} (URL: ${url}). Possible network interruption."
+  fi
 }
 
 maybe_verify_sha256_from_release() {
@@ -169,11 +187,10 @@ maybe_verify_sha256_from_release() {
   fi
 
   # The sha256 file may contain multiple entries and varying formats.
-  # We attempt to find a matching line for the downloaded tarball name.
+  # Use only exact-match strategies to avoid path-injection false matches.
   local expected actual
   expected="$(awk -v n="$tar_name" '
     $2 == n || $2 == "*" n || $2 == "./" n || $2 == "*./" n { print $1; exit }
-    $2 ~ ("/" n "$") { print $1; exit }
     { next }
   ' "$tmp_sha" 2>/dev/null || true)"
 
@@ -327,18 +344,27 @@ cleanup_tmp() {
 
 port_is_listening() {
   local port="$1"
-  # Match both IPv4 (:PORT) and IPv6 (:::PORT or *:PORT) listen entries.
-  # ss/netstat formats: "0.0.0.0:PORT", ":::PORT", "*:PORT"
-  local pattern="(0\.0\.0\.0|\*|::):${port}([^0-9]|$)"
+  # Match listening entries in both IPv4 and IPv6 forms:
+  #   IPv4:  "0.0.0.0:PORT" or "*:PORT"
+  #   IPv6:  ":::PORT"  (triple-colon, as shown by `ss`/`netstat` for [::]:PORT)
+  # Use two separate patterns to avoid the ambiguity of matching "::" vs ":::".
+  local pattern_v4="(0\.0\.0\.0|\*):${port}([^0-9]|$)"
+  local pattern_v6=":::${port}([^0-9]|$)"
 
   if command -v ss >/dev/null 2>&1; then
-    ss -lntup 2>/dev/null | grep -Eq "${pattern}"
-    return $?
+    local out
+    out="$(ss -lntup 2>/dev/null)"
+    printf '%s\n' "$out" | grep -Eq "${pattern_v4}" && return 0
+    printf '%s\n' "$out" | grep -Eq "${pattern_v6}" && return 0
+    return 1
   fi
 
   if command -v netstat >/dev/null 2>&1; then
-    netstat -lntup 2>/dev/null | grep -Eq "${pattern}"
-    return $?
+    local out
+    out="$(netstat -lntup 2>/dev/null)"
+    printf '%s\n' "$out" | grep -Eq "${pattern_v4}" && return 0
+    printf '%s\n' "$out" | grep -Eq "${pattern_v6}" && return 0
+    return 1
   fi
 
   log_warn "未找到 ss/netstat，跳过监听端口探测，仅依赖 systemd 状态判断"
@@ -463,12 +489,20 @@ main() {
 
   # Auto-detect TCP Fast Open support (kernel >= 4.11, /proc knob value >= 2).
   # Detect here in main() so write_config receives it as a plain argument.
+  # Auto-detect TCP Fast Open support.
+  # Kernel value meaning: 1=client TFO, 2=server TFO, 3=both.
+  # A value >= 2 means server-side TFO is enabled.
+  # If TFO is not enabled, print a one-time hint; do NOT modify kernel params automatically.
   local tfo_val fast_open
   tfo_val="$(cat /proc/sys/net/ipv4/tcp_fastopen 2>/dev/null || echo 0)"
   fast_open=false
   if (( tfo_val >= 2 )); then
     fast_open=true
     log_info "TCP Fast Open 已启用（内核支持，/proc/sys/net/ipv4/tcp_fastopen=${tfo_val}）"
+  else
+    log_info "TCP Fast Open 未启用（当前值：${tfo_val}）。如需启用，请手动执行："
+    log_info "  echo 3 | sudo tee /proc/sys/net/ipv4/tcp_fastopen"
+    log_info "  # 永久生效：echo 'net.ipv4.tcp_fastopen=3' | sudo tee /etc/sysctl.d/10-tfo.conf && sudo sysctl -p /etc/sysctl.d/10-tfo.conf"
   fi
 
   log_info "步骤 1/3：获取 shadowsocks-rust 版本信息..."
@@ -632,8 +666,10 @@ main() {
   local ss_link=""
   if command -v base64 >/dev/null 2>&1; then
     local userinfo_b64
-    # SS URI spec uses base64url (RFC 4648 §5): replace + with - and / with _
+    # SS URI spec: base64url (RFC 4648 §5), NO padding ('=').
+    # Steps: standard base64 encode → strip padding → replace + with - and / with _
     userinfo_b64="$(printf '%s' "${method}:${password}" | base64 -w 0 2>/dev/null || printf '%s' "${method}:${password}" | base64 2>/dev/null | tr -d '\n')"
+    userinfo_b64="$(printf '%s' "$userinfo_b64" | tr -d '=')"
     userinfo_b64="${userinfo_b64//+/-}"
     userinfo_b64="${userinfo_b64//\//_}"
     if [[ -n "$userinfo_b64" ]]; then
