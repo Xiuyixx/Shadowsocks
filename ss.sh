@@ -92,7 +92,7 @@ ensure_runtime_dependencies() {
   local missing=()
   local cmd
 
-  for cmd in curl tar systemctl openssl awk sed grep jq; do
+  for cmd in curl tar xz systemctl openssl awk sed grep jq; do
     check_cmd "$cmd" || missing+=("$cmd")
   done
 
