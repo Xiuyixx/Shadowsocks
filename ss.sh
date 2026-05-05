@@ -740,14 +740,38 @@ show_node_details() {
   echo "SS链接：$link"
   echo
   echo "----------------------------------------"
-  echo "  1) 修改节点"
-  echo "  2) 删除节点"
+  echo "  1) 启动节点"
+  echo "  2) 停止节点"
+  echo "  3) 重启节点"
+  echo "  4) 修改节点"
+  echo "  5) 删除节点"
   echo "  0) 返回"
   echo "----------------------------------------"
   read -rp "请选择: " choice
   case "$choice" in
-    1) edit_node "$name" ;;
+    1)
+      if ${SUDO} systemctl start "$(service_name "$name")"; then
+        info "节点 $name 已启动。"
+      else
+        error "节点 $name 启动失败。"
+      fi
+      ;;
     2)
+      if ${SUDO} systemctl stop "$(service_name "$name")"; then
+        info "节点 $name 已停止。"
+      else
+        error "节点 $name 停止失败。"
+      fi
+      ;;
+    3)
+      if ${SUDO} systemctl restart "$(service_name "$name")"; then
+        info "节点 $name 已重启。"
+      else
+        error "节点 $name 重启失败。"
+      fi
+      ;;
+    4) edit_node "$name" ;;
+    5)
       if confirm "确认删除节点 $name 吗？"; then
         ${SUDO} systemctl disable --now "$(service_name "$name")" >/dev/null 2>&1 || true
         ${SUDO} rm -f "$(service_unit_path "$name")"
@@ -899,7 +923,6 @@ node_menu() {
     echo "========================================"
     echo "1) 新增节点"
     echo "2) 查看节点详情"
-    echo "3) 启动 / 停止 / 重启节点"
     echo "0) 返回主菜单"
     echo "========================================"
     read -rp "请选择功能: " choice
@@ -907,9 +930,8 @@ node_menu() {
     case "$choice" in
       1) run_menu_action add_node; pause ;;
       2) run_menu_action show_node_details; pause ;;
-      3) run_menu_action control_node; pause ;;
       0) return 0 ;;
-      *) warn "无效输入，请输入 0-3。"; pause ;;
+      *) warn "无效输入，请输入 0-2。"; pause ;;
     esac
   done
 }
