@@ -785,23 +785,21 @@ node_menu() {
     clear
     echo "节点管理"
     echo "========================================"
-    echo "1) 查看所有节点"
-    echo "2) 新增节点"
-    echo "3) 删除节点"
-    echo "4) 查看节点详情 / SS 链接"
-    echo "5) 启动 / 停止 / 重启节点"
+    echo "1) 新增节点"
+    echo "2) 删除节点"
+    echo "3) 查看节点详情"
+    echo "4) 启动 / 停止 / 重启节点"
     echo "0) 返回主菜单"
     echo "========================================"
     read -rp "请选择功能: " choice
 
     case "$choice" in
-      1) run_menu_action view_all_nodes; pause ;;
-      2) run_menu_action add_node; pause ;;
-      3) run_menu_action delete_node; pause ;;
-      4) run_menu_action show_node_details; pause ;;
-      5) run_menu_action control_node; pause ;;
+      1) run_menu_action add_node; pause ;;
+      2) run_menu_action delete_node; pause ;;
+      3) run_menu_action show_node_details; pause ;;
+      4) run_menu_action control_node; pause ;;
       0) return 0 ;;
-      *) warn "无效输入，请输入 0-5。"; pause ;;
+      *) warn "无效输入，请输入 0-4。"; pause ;;
     esac
   done
 }
@@ -828,7 +826,7 @@ service_status() {
       active_state="inactive"
     fi
 
-    if ss -H -lntu 2>/dev/null | awk '{print $5}' | grep -Eq "(^|:)$NODE_PORT$"; then
+    if /usr/sbin/ss -H -lntu 2>/dev/null | awk '{print $5}' | grep -Eq "(^|:)$NODE_PORT$"; then
       listen_state="listening"
     else
       listen_state="closed"
@@ -849,36 +847,47 @@ uninstall_all_nodes() {
   ${SUDO} systemctl daemon-reload >/dev/null 2>&1 || true
 }
 
+uninstall_script() {
+  # 删除脚本本体：/usr/local/bin/ss、/opt/Shadowsocks
+  ${SUDO} rm -f "/usr/local/bin/ss"
+  ${SUDO} rm -rf "/opt/Shadowsocks"
+  info "脚本本体已删除（/usr/local/bin/ss、/opt/Shadowsocks）。"
+}
+
 uninstall_menu() {
   local choice
   while true; do
     clear
-    echo "卸载选项:"
-    echo "  1) 卸载所有节点（保留 ssserver 二进制）"
-    echo "  2) 完全卸载（节点 + ssserver + 用户）"
+    echo "卸载"
+    echo "========================================"
+    echo "  1) 仅卸载所有节点（保留 ssserver 和脚本）"
+    echo "  2) 完全卸载（节点 + ssserver + 系统用户 + 脚本）"
     echo "  0) 返回"
+    echo "========================================"
     read -rp "请选择功能: " choice
 
     case "$choice" in
       1)
-        if confirm "确认卸载所有节点？" && confirm "请再次确认：该操作会删除所有节点配置。"; then
+        if confirm "确认卸载所有节点？" && confirm "再次确认：将删除所有节点配置，操作不可撤销。"; then
           uninstall_all_nodes
-          info "所有节点已卸载，ssserver 二进制已保留。"
+          info "所有节点已卸载，ssserver 和脚本已保留。"
         else
-          info "已取消卸载。"
+          info "已取消。"
         fi
         pause
         ;;
       2)
-        if confirm "确认完全卸载 Shadowsocks-X？" && confirm "请再次确认：该操作会删除节点、二进制和系统用户。"; then
+        if confirm "确认完全卸载 Shadowsocks-X？" && confirm "再次确认：将删除节点、ssserver、系统用户及脚本，操作不可撤销。"; then
           uninstall_all_nodes
           ${SUDO} rm -f "$BIN_PATH"
           if id -u "$RUN_USER" >/dev/null 2>&1; then
             ${SUDO} userdel "$RUN_USER" >/dev/null 2>&1 || true
           fi
-          info "已完成完全卸载。"
+          uninstall_script
+          info "已完成完全卸载，脚本即将退出。"
+          exit 0
         else
-          info "已取消卸载。"
+          info "已取消。"
         fi
         pause
         ;;
