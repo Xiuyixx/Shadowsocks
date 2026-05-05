@@ -532,9 +532,9 @@ choose_port() {
         ;;
       2)
         while true; do
-          read -rp "请输入端口（10000-60000）: " port
+          read -rp "请输入端口（1-65535）: " port
           [[ "$port" =~ ^[0-9]+$ ]] || { echo "端口必须是数字。" >&2; continue; }
-          (( port >= 10000 && port <= 60000 )) || { echo "端口超出范围。" >&2; continue; }
+          (( port >= 1 && port <= 65535 )) || { echo "端口超出范围（1-65535）。" >&2; continue; }
           if port_in_use "$port"; then
             echo "端口 $port 已被占用，请重新输入。" >&2
             continue
