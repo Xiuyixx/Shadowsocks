@@ -150,15 +150,19 @@ bootstrap_install() {
     fi
   fi
 
-  if ! ${SUDO} env NO_RUN=1 bash "$INSTALL_DIR/install.sh" --no-run; then
-    echo "[ERROR] 安装器执行失败。请根据上面的输出检查具体报错。"
-    exit 1
-  fi
+  # 直接执行安装，不递归调用 install.sh（避免同路径 cp 报错）
+  ${SUDO} chmod +x "$INSTALL_DIR/ss.sh" "$INSTALL_DIR/install.sh"
+  [[ -f "$INSTALL_DIR/uninstall.sh" ]] && ${SUDO} chmod +x "$INSTALL_DIR/uninstall.sh"
+
+  ${SUDO} mkdir -p "$(dirname "$TARGET_BIN")"
+  ${SUDO} install -m 0755 "$INSTALL_DIR/ss.sh" "$TARGET_BIN"
+
+  echo "[OK] 安装完成。可以运行：ss"
 
   if [[ -t 0 && -t 1 ]]; then
     read -rp "是否立即启动 Shadowsocks-X？[y/N]: " run_now
     if [[ "$run_now" =~ ^[Yy]$ ]]; then
-      echo "[OK] 安装完成，正在启动 Shadowsocks-X..."
+      echo "[OK] 正在启动 Shadowsocks-X..."
       exec "$TARGET_BIN"
     fi
   fi
