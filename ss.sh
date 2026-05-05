@@ -185,7 +185,18 @@ generate_password() {
 
 port_in_use() {
   local port="$1"
-  ss -H -lntu 2>/dev/null | awk '{print $5}' | grep -Eq "(^|:)$port$"
+  # 使用系统绝对路径避免被 /usr/local/bin/ss 覆盖
+  local ss_bin
+  ss_bin="$(command -v ss 2>/dev/null || true)"
+  # 确保找到的是 iproute2 的 ss 而非我们自己的脚本
+  if [[ -n "$ss_bin" && "$ss_bin" != "/usr/local/bin/ss" ]]; then
+    "$ss_bin" -H -lntu 2>/dev/null | awk '{print $5}' | grep -Eq "(^|:)${port}$" && return 0 || true
+  elif [[ -x "/usr/sbin/ss" ]]; then
+    /usr/sbin/ss -H -lntu 2>/dev/null | awk '{print $5}' | grep -Eq "(^|:)${port}$" && return 0 || true
+  elif command -v netstat >/dev/null 2>&1; then
+    netstat -lntu 2>/dev/null | awk '{print $4}' | grep -Eq "(^|:)${port}$" && return 0 || true
+  fi
+  return 1
 }
 
 random_free_port() {
