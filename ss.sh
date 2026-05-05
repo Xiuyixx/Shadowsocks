@@ -2,7 +2,7 @@
 set -euo pipefail
 
 APP_NAME="Shadowsocks-X"
-APP_VERSION="1.0.0"
+APP_VERSION="1.1.0"
 CONFIG_BASE="/etc/shadowsocks"
 BIN_PATH="/usr/local/bin/ssserver"
 SERVICE_PREFIX="ss-node"
@@ -246,9 +246,11 @@ mode_to_label() {
 service_state() {
   local name="$1"
   if systemctl is-active --quiet "$(service_name "$name")"; then
-    echo "running"
+    echo "active"
+  elif systemctl is-failed --quiet "$(service_name "$name")"; then
+    echo "failed"
   else
-    echo "stopped"
+    echo "inactive"
   fi
 }
 
@@ -278,7 +280,7 @@ get_public_ip() {
       return 0
     fi
   done
-  warn "公网 IP 获取失败，请手动确认服务器地址。"
+  warn "公网 IP 获取失败，SS 链接中的地址将使用占位符，请手动替换为真实公网 IP。"
   echo "<YOUR_SERVER_IP>"
 }
 
@@ -378,6 +380,17 @@ WantedBy=multi-user.target
 EOF
 }
 
+refresh_node_services() {
+  local nodes=() node
+  mapfile -t nodes < <(list_nodes)
+  for node in "${nodes[@]}"; do
+    write_node_service "$node"
+  done
+  if [[ ${#nodes[@]} -gt 0 ]]; then
+    ${SUDO} systemctl daemon-reload
+  fi
+}
+
 download_and_install_ssserver() {
   local version="$1"
   local arch release_json tar_url tar_name tmp_dir latest installed_version
@@ -454,6 +467,7 @@ download_and_install_ssserver() {
   }
 
   ${SUDO} install -m 0755 "$tmp_dir/ssserver" "$BIN_PATH"
+  refresh_node_services
   info "ssserver 已安装到：$BIN_PATH"
   info "当前版本：$($BIN_PATH --version 2>&1 | head -n1)"
   return 0
@@ -468,33 +482,6 @@ install_or_upgrade() {
     [[ -z "$version" ]] && version="latest"
   fi
   run_menu_action download_and_install_ssserver "$version"
-}
-
-show_node_row() {
-  local name="$1"
-  local NODE_PORT NODE_PASSWORD NODE_METHOD NODE_MODE
-  if ! load_node_meta "$name"; then
-    warn "节点 $name 元数据缺失，已跳过。"
-    return 0
-  fi
-  printf '%-18s %-8s %-30s %-10s\n' "$name" "$NODE_PORT" "$NODE_METHOD" "$(service_state "$name")"
-}
-
-view_all_nodes() {
-  local nodes=()
-  mapfile -t nodes < <(list_nodes)
-
-  if [[ ${#nodes[@]} -eq 0 ]]; then
-    warn "暂无节点"
-    return 0
-  fi
-
-  printf '%-18s %-8s %-30s %-10s\n' "节点名" "端口" "加密方式" "状态"
-  printf '%-18s %-8s %-30s %-10s\n' "------" "----" "--------" "----"
-  local node
-  for node in "${nodes[@]}"; do
-    show_node_row "$node"
-  done
 }
 
 choose_method() {
@@ -691,6 +678,7 @@ add_node() {
   info "节点创建完成。"
   echo "节点名称：$name"
   echo "服务器地址：$public_ip"
+  [[ "$public_ip" == "<YOUR_SERVER_IP>" ]] && echo "注意：请将链接中的占位地址替换为真实公网 IP。"
   echo "端口：$port"
   echo "加密方式：$method"
   echo "密码：$password"
@@ -698,27 +686,13 @@ add_node() {
   echo "SS链接：$link"
 }
 
-delete_node() {
-  local name
-  echo "请选择要删除的节点："
-  name="$(select_node_interactive "输入编号: ")" || return 1
-
-  if ! confirm "确认删除节点 $name 吗？"; then
-    info "已取消删除。"
-    return 0
-  fi
-
-  ${SUDO} systemctl disable --now "$(service_name "$name")" >/dev/null 2>&1 || true
-  ${SUDO} rm -f "$(service_unit_path "$name")"
-  ${SUDO} rm -rf "$(node_dir "$name")"
-  ${SUDO} systemctl daemon-reload >/dev/null 2>&1 || true
-  info "节点 $name 已删除。"
-}
-
 show_node_details() {
   local name public_ip link choice
   local NODE_PORT NODE_PASSWORD NODE_METHOD NODE_MODE
 
+  clear
+  echo "节点详情"
+  echo "========================================"
   echo "请选择节点："
   name="$(select_node_interactive "输入编号: ")" || return 1
   load_node_meta "$name" || {
@@ -732,6 +706,7 @@ show_node_details() {
   echo
   echo "节点名称：$name"
   echo "服务器地址：$public_ip"
+  [[ "$public_ip" == "<YOUR_SERVER_IP>" ]] && echo "注意：请将链接中的占位地址替换为真实公网 IP。"
   echo "端口：$NODE_PORT"
   echo "加密方式：$NODE_METHOD"
   echo "密码：$NODE_PASSWORD"
@@ -860,6 +835,11 @@ edit_node() {
     *) new_mode="$NODE_MODE" ;;
   esac
 
+  if [[ "$new_method" == 2022-* ]] && ! validate_ss2022_password "$new_method" "$new_password"; then
+    error "SS2022 密码必须是对应长度的 base64 字符串。"
+    return 1
+  fi
+
   # 确认并应用
   echo
   echo "将更新为：加密=$new_method 端口=$new_port 密码=$new_password 模式=$(mode_to_label "$new_mode")"
@@ -874,50 +854,9 @@ edit_node() {
   fi
 }
 
-control_node() {
-  local name action
-  echo "请选择节点："
-  name="$(select_node_interactive "输入编号: ")" || return 1
-
-  echo "1) 启动"
-  echo "2) 停止"
-  echo "3) 重启"
-  read -rp "请选择操作: " action
-
-  case "$action" in
-    1)
-      if ${SUDO} systemctl start "$(service_name "$name")"; then
-        info "节点 $name 已启动。"
-      else
-        error "节点 $name 启动失败。"
-        return 1
-      fi
-      ;;
-    2)
-      if ${SUDO} systemctl stop "$(service_name "$name")"; then
-        info "节点 $name 已停止。"
-      else
-        error "节点 $name 停止失败。"
-        return 1
-      fi
-      ;;
-    3)
-      if ${SUDO} systemctl restart "$(service_name "$name")"; then
-        info "节点 $name 已重启。"
-      else
-        error "节点 $name 重启失败。"
-        return 1
-      fi
-      ;;
-    *)
-      warn "无效输入。"
-      ;;
-  esac
-}
-
 node_menu() {
   while true; do
-    clear
+    banner
     echo "节点管理"
     echo "========================================"
     echo "1) 新增节点"
@@ -932,38 +871,6 @@ node_menu() {
       0) return 0 ;;
       *) warn "无效输入，请输入 0-2。"; pause ;;
     esac
-  done
-}
-
-service_status() {
-  local nodes=()
-  local node NODE_PORT NODE_PASSWORD NODE_METHOD NODE_MODE listen_state active_state
-  mapfile -t nodes < <(list_nodes)
-
-  if [[ ${#nodes[@]} -eq 0 ]]; then
-    warn "暂无节点"
-    return 0
-  fi
-
-  printf '%-18s %-10s %-10s %-10s\n' "节点名" "systemd" "监听" "端口"
-  printf '%-18s %-10s %-10s %-10s\n' "------" "-------" "----" "----"
-  for node in "${nodes[@]}"; do
-    load_node_meta "$node" || continue
-    if systemctl is-active --quiet "$(service_name "$node")"; then
-      active_state="active"
-    elif systemctl is-failed --quiet "$(service_name "$node")"; then
-      active_state="failed"
-    else
-      active_state="inactive"
-    fi
-
-    if /usr/sbin/ss -H -lntu 2>/dev/null | awk '{print $5}' | grep -Eq "(^|:)$NODE_PORT$"; then
-      listen_state="listening"
-    else
-      listen_state="closed"
-    fi
-
-    printf '%-18s %-10s %-10s %-10s\n' "$node" "$active_state" "$listen_state" "$NODE_PORT"
   done
 }
 
@@ -988,7 +895,7 @@ uninstall_script() {
 uninstall_menu() {
   local choice
   while true; do
-    clear
+    banner
     echo "卸载"
     echo "========================================"
     echo "  1) 仅卸载所有节点（保留 ssserver 和脚本）"
