@@ -801,13 +801,18 @@ edit_node() {
 
   # 加密方式
   echo "当前加密方式：$NODE_METHOD"
-  echo "  0) 保持不变"
   local new_method method_choice
   new_method="$NODE_METHOD"
-  read -rp "是否修改加密方式？[y/N]: " method_choice
+  read -rp "是否修改加密方式？[回车保持/y修改]: " method_choice
   if [[ "$method_choice" =~ ^[Yy]$ ]]; then
     new_method="$(choose_method)" || new_method="$NODE_METHOD"
     [[ -z "$new_method" ]] && new_method="$NODE_METHOD"
+  fi
+
+  # 加密方式变更时自动重新生成密码
+  local auto_regen_pwd=0
+  if [[ "$new_method" != "$NODE_METHOD" ]]; then
+    auto_regen_pwd=1
   fi
 
   # 端口
@@ -826,24 +831,30 @@ edit_node() {
   done
 
   # 密码
-  local new_password
-  echo "当前密码：$NODE_PASSWORD"
-  echo "密码设置："
-  echo "  1) 自动生成新密码"
-  echo "  2) 手动输入新密码"
-  echo "  回车保持不变"
-  read -rp "请选择 [1-2]：" pw_choice
-  case "$pw_choice" in
-    1) new_password="$(generate_password "$new_method")" ;;
-    2)
-      while true; do
-        read -rp "请输入新密码: " new_password
-        [[ -n "$new_password" ]] && break
-        warn "密码不能为空。"
-      done
-      ;;
-    *) new_password="$NODE_PASSWORD" ;;
-  esac
+  local new_password pw_choice
+  if (( auto_regen_pwd )); then
+    # 加密方式已变更，自动重新生成匹配新协议的密码
+    new_password="$(generate_password "$new_method")"
+    echo "加密方式已变更，已自动生成新密码：$new_password"
+  else
+    echo "当前密码：$NODE_PASSWORD"
+    echo "密码设置："
+    echo "  1) 自动生成新密码"
+    echo "  2) 手动输入新密码"
+    echo "  回车保持不变"
+    read -rp "请选择 [1-2]：" pw_choice
+    case "$pw_choice" in
+      1) new_password="$(generate_password "$new_method")" ;;
+      2)
+        while true; do
+          read -rp "请输入新密码: " new_password
+          [[ -n "$new_password" ]] && break
+          warn "密码不能为空。"
+        done
+        ;;
+      *) new_password="$NODE_PASSWORD" ;;
+    esac
+  fi
 
   # 传输模式
   local new_mode
