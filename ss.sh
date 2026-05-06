@@ -317,7 +317,7 @@ write_node_config() {
 
   ${SUDO} mkdir -p "$dir"
   jq -n \
-    --arg server "::" \
+    --arg server "0.0.0.0" \
     --argjson server_port "$port" \
     --arg password "$password" \
     --arg method "$method" \
