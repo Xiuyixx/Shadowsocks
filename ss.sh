@@ -316,6 +316,8 @@ write_node_config() {
   meta_tmp="$(mktemp)"
 
   ${SUDO} mkdir -p "$dir"
+  ${SUDO} chown root:"$RUN_USER" "$dir"
+  ${SUDO} chmod 750 "$dir"
   jq -n \
     --arg server "0.0.0.0" \
     --argjson server_port "$port" \
