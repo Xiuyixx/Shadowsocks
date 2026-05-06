@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-SCRIPT_VERSION="2026-04-14"
+SCRIPT_VERSION="2026-05-06"
 INSTALL_META_VERSION="1"
 
 usage() {
@@ -22,7 +22,7 @@ OPTIONS
       --bin-dir <dir>       Install ssserver into (default: /usr/local/bin)
       --config-dir <dir>    Config dir (default: /etc/shadowsocks)
       --user <name>         Run service as this system user (default: shadowsocks)
-      --mode <mode>         Transport mode: tcp_and_udp | tcp_only (default: tcp_and_udp)
+      --mode <mode>         Transport mode: tcp_and_udp | tcp_only | udp_only (default: tcp_and_udp)
       --no-udp              Alias for --mode tcp_only
       --skip-sha256         Do not attempt sha256 verification
   -h, --help                Show help
@@ -90,7 +90,7 @@ get_arch() {
 
 github_api() {
   local url="$1"
-  curl -fsSL -sS \
+  curl -fsSL \
     -H 'Accept: application/vnd.github+json' \
     -H 'X-GitHub-Api-Version: 2022-11-28' \
     -H 'User-Agent: SSAes128gcm-installer' \
@@ -108,8 +108,7 @@ get_release_by_tag() {
 
 download_release_asset() {
   local url="$1" out="$2"
-  # Quiet download (no progress), but still show errors.
-  curl -fL -sS --retry 3 --retry-delay 1 -o "$out" "$url"
+  curl -fL --retry 3 --retry-delay 1 -o "$out" "$url"
 }
 
 maybe_verify_sha256_from_release() {
@@ -134,7 +133,7 @@ maybe_verify_sha256_from_release() {
   tmp_sha="$(mktemp)"
   tmp_one="$(mktemp)"
 
-  if ! curl -fsSL -sS "$sha_url" -o "$tmp_sha"; then
+  if ! curl -fsSL "$sha_url" -o "$tmp_sha"; then
     log_warn "下载 sha256 文件失败，继续安装但不做校验"
     rm -f "$tmp_sha" "$tmp_one"
     return 0
@@ -408,8 +407,8 @@ main() {
     log_info "检测到 SS2022 方法：${method}（建议 password 使用对应长度 key 的 base64）"
   fi
 
-  if [[ "$mode" != "tcp_and_udp" && "$mode" != "tcp_only" ]]; then
-    die "Invalid --mode: $mode (use tcp_and_udp or tcp_only)"
+  if [[ "$mode" != "tcp_and_udp" && "$mode" != "tcp_only" && "$mode" != "udp_only" ]]; then
+    die "Invalid --mode: $mode (use tcp_and_udp, tcp_only or udp_only)"
   fi
 
   local ss_arch
@@ -541,7 +540,8 @@ main() {
 
   local hostname_short node_name public_ip ip_fallback
   hostname_short="$(hostname -s 2>/dev/null || hostname 2>/dev/null || echo "ss")"
-  node_name="${hostname_short}"
+  node_name="$(printf '%s' "$hostname_short" | tr ' ' '-' | tr -cd 'A-Za-z0-9._~-')"
+  [[ -n "$node_name" ]] || node_name="ss"
 
   public_ip=""
   if command -v curl >/dev/null 2>&1; then
@@ -558,6 +558,8 @@ main() {
   ip_fallback="<YOUR_SERVER_IP>"
   if [[ -n "$public_ip" ]]; then
     ip_fallback="$public_ip"
+  else
+    log_warn "无法自动获取公网 IP，请手动替换 SS 链接中的服务器地址"
   fi
 
   echo
@@ -574,6 +576,7 @@ main() {
   if command -v base64 >/dev/null 2>&1; then
     local userinfo_b64
     userinfo_b64="$(printf '%s' "${method}:${password}" | base64 -w 0 2>/dev/null || printf '%s' "${method}:${password}" | base64 2>/dev/null | tr -d '\n')"
+    userinfo_b64="$(printf '%s' "$userinfo_b64" | tr '+/' '-_' | tr -d '=')"
     if [[ -n "$userinfo_b64" ]]; then
       ss_link="ss://${userinfo_b64}@${ip_fallback}:${port}#${node_name}"
     fi
@@ -590,6 +593,8 @@ main() {
   local firewall_proto="TCP"
   if [[ "$mode" == "tcp_and_udp" ]]; then
     firewall_proto="TCP, UDP"
+  elif [[ "$mode" == "udp_only" ]]; then
+    firewall_proto="UDP"
   fi
   echo "Firewall/Security Group: allow ${firewall_proto} ${port}"
   log_ok "=== 一键安装完成 ==="

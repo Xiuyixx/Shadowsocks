@@ -24,7 +24,7 @@
 推荐写法：
 
 ```bash
-curl -fsSL "https://raw.githubusercontent.com/Xiuyixx/Shadowsocks/main/install.sh?nocache=$(date +%s)" | sudo bash
+curl -fsSL https://raw.githubusercontent.com/Xiuyixx/Shadowsocks/main/install.sh | sudo bash
 ```
 
 兼容写法：
@@ -79,8 +79,9 @@ bash install.sh --help
 - `--password` / `SS_PASSWORD`
 - `--method` / `SS_METHOD`（默认 `aes-128-gcm`）
 - `--version` / `SS_VERSION`（`latest` 或 `v1.22.0` 这种 tag）
-- `--mode`：传输模式（`tcp_and_udp` / `tcp_only`）
+- `--mode`：传输模式（`tcp_and_udp` / `tcp_only` / `udp_only`）
 - `--no-udp`：禁用 UDP（等价于 `--mode tcp_only`）
+- `--mode udp_only`：只启用 UDP
 
 说明：
 - `bash install.sh --help` 和 `bash uninstall.sh --help` 可直接查看帮助，不要求 root。
@@ -159,7 +160,7 @@ curl -fsSL https://raw.githubusercontent.com/Xiuyixx/Shadowsocks/main/install.sh
 推荐直接使用本仓库的卸载脚本（会停止服务并清理 unit/配置/二进制/用户）：
 
 ```bash
-curl -fsSL "https://raw.githubusercontent.com/Xiuyixx/Shadowsocks/main/uninstall.sh?nocache=$(date +%s)" | sudo bash
+curl -fsSL https://raw.githubusercontent.com/Xiuyixx/Shadowsocks/main/uninstall.sh | sudo bash
 ```
 
 如需手动卸载，可参考 `uninstall.sh`。
