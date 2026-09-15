@@ -14,7 +14,12 @@ jq -n \
     serviceName: "--help"
   }' > "${tmp_dir}/install-meta.json"
 
-if output="$(bash "${repo_dir}/uninstall.sh" --config-dir "$tmp_dir" </dev/null 2>&1)"; then
+run_uninstaller=(bash)
+if [[ ${EUID:-0} -ne 0 ]]; then
+  run_uninstaller=(sudo bash)
+fi
+
+if output="$("${run_uninstaller[@]}" "${repo_dir}/uninstall.sh" --config-dir "$tmp_dir" </dev/null 2>&1)"; then
   printf 'expected unsafe metadata to be rejected\n' >&2
   exit 1
 fi
