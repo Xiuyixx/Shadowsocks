@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-SCRIPT_VERSION="2026-05-06"
+SCRIPT_VERSION="2026-09-15"
 INSTALL_META_VERSION="1"
 
 usage() {
@@ -82,8 +82,8 @@ get_arch() {
   local arch
   arch="$(uname -m)"
   case "$arch" in
-    x86_64|amd64) echo "x86_64-unknown-linux-gnu" ;;
-    aarch64|arm64) echo "aarch64-unknown-linux-gnu" ;;
+    x86_64|amd64) echo "x86_64-unknown-linux-musl" ;;
+    aarch64|arm64) echo "aarch64-unknown-linux-musl" ;;
     *) die "Unsupported arch: $arch (supported: x86_64, aarch64)" ;;
   esac
 }

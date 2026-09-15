@@ -152,6 +152,7 @@ curl -fsSL https://raw.githubusercontent.com/Xiuyixx/Shadowsocks/main/install.sh
 
 - `curl | bash` 天生有风险：你是在以 root 身份执行远程代码。更稳妥的做法是先下载 `install.sh` 审计后再运行。
 - 更安全/可复现的方式是用 `--version vX.Y.Z` 固定版本。
+- 安装器使用上游的 Linux musl 静态构建，不依赖目标系统的 glibc 版本。
 - 安装脚本会在上游 release 提供 `.sha256` 文件时进行**尽力而为的校验**；否则会警告并继续。
 - 建议用防火墙做 allowlist（只允许你的固定 IP 连接）。
 
