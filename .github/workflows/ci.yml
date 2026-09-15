@@ -1,0 +1,25 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  shell:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install ShellCheck
+        run: sudo apt-get update && sudo apt-get install -y shellcheck
+      - name: Check shell syntax
+        run: bash -n install.sh uninstall.sh tests/*.sh
+      - name: Run ShellCheck
+        run: shellcheck -S style install.sh uninstall.sh tests/*.sh
+      - name: Run tests
+        run: |
+          for test_file in tests/test_*.sh; do
+            bash "$test_file"
+          done

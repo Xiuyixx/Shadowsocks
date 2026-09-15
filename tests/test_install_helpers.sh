@@ -1,0 +1,59 @@
+#!/usr/bin/env bash
+# shellcheck disable=SC1090,SC2317
+set -euo pipefail
+
+repo_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+source "${repo_dir}/install.sh"
+
+assert_fails() {
+  if ( "$@" ) >/dev/null 2>&1; then
+    printf 'expected failure: %s\n' "$*" >&2
+    exit 1
+  fi
+}
+
+[[ "$(format_uri_host '203.0.113.1')" == "203.0.113.1" ]]
+[[ "$(format_uri_host '2001:db8::1')" == "[2001:db8::1]" ]]
+[[ "$(format_uri_host '[2001:db8::1]')" == "[2001:db8::1]" ]]
+
+validate_install_inputs "/usr/local/bin" "/etc/shadowsocks" "shadowsocks"
+assert_fails validate_install_inputs "/" "/etc/shadowsocks" "shadowsocks"
+assert_fails validate_install_inputs "/usr/local/bin" "/" "shadowsocks"
+assert_fails validate_install_inputs "/usr/local/bad path" "/etc/shadowsocks" "shadowsocks"
+assert_fails validate_install_inputs "/usr/local/bin" "/etc/shadowsocks" $'bad\nUser=root'
+
+fake_binary="$(mktemp)"
+trap 'rm -f "$fake_binary"' EXIT
+printf '#!/usr/bin/env bash\nexit 1\n' > "$fake_binary"
+chmod +x "$fake_binary"
+assert_fails validate_extracted_binary "$fake_binary"
+printf '#!/usr/bin/env bash\nprintf "shadowsocks test\\n"\n' > "$fake_binary"
+validate_extracted_binary "$fake_binary"
+
+password_128="$(generate_password '2022-blake3-aes-128-gcm')"
+password_256="$(generate_password '2022-blake3-aes-256-gcm')"
+validate_password_for_method '2022-blake3-aes-128-gcm' "$password_128"
+validate_password_for_method '2022-blake3-aes-256-gcm' "$password_256"
+validate_password_for_method '2022-blake3-chacha20-poly1305' "$password_256"
+assert_fails validate_password_for_method '2022-blake3-aes-128-gcm' "$password_256"
+assert_fails validate_password_for_method '2022-blake3-aes-256-gcm' 'not-base64'
+
+ss() {
+  case "$*" in
+    *-ltn*) printf 'LISTEN 0 1024 0.0.0.0:8388 0.0.0.0:*\n' ;;
+    *-lun*) return 0 ;;
+  esac
+}
+port_is_listening 8388 tcp_only
+assert_fails port_is_listening 8388 udp_only
+assert_fails port_is_listening 8388 tcp_and_udp
+
+ss() {
+  case "$*" in
+    *-ltn*) printf 'LISTEN 0 1024 0.0.0.0:8388 0.0.0.0:*\n' ;;
+    *-lun*) printf 'UNCONN 0 0 0.0.0.0:8388 0.0.0.0:*\n' ;;
+  esac
+}
+port_is_listening 8388 tcp_and_udp
+
+printf '%s\n' 'installer helper tests passed'

@@ -34,6 +34,16 @@ require_value() {
   fi
 }
 
+validate_uninstall_inputs() {
+  [[ "$BIN_PATH" == /* && "$BIN_PATH" != "/" && "$BIN_PATH" =~ ^[A-Za-z0-9_./:+-]+$ ]] ||
+    die "Invalid --bin-path or metadata path: $BIN_PATH"
+  [[ "$CONFIG_DIR" == /* && "$CONFIG_DIR" != "/" && "$CONFIG_DIR" =~ ^[A-Za-z0-9_./:+-]+$ ]] ||
+    die "Invalid --config-dir or metadata path: $CONFIG_DIR"
+  [[ "$SS_USER" =~ ^[a-z_][a-z0-9_-]*[$]?$ ]] || die "Invalid --user or metadata user: $SS_USER"
+  [[ "$SERVICE_NAME" =~ ^[A-Za-z0-9@_.-]+\.service$ ]] ||
+    die "Invalid --service or metadata service: $SERVICE_NAME"
+}
+
 BIN_PATH=""
 CONFIG_DIR=""
 SS_USER=""
@@ -115,6 +125,8 @@ fi
 : "${BIN_PATH:=$DEFAULT_BIN_PATH}"
 : "${SS_USER:=$DEFAULT_SS_USER}"
 : "${SERVICE_NAME:=$DEFAULT_SERVICE_NAME}"
+
+validate_uninstall_inputs
 
 UNIT_PATH="/etc/systemd/system/${SERVICE_NAME}"
 

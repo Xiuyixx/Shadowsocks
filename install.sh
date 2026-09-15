@@ -28,7 +28,7 @@ OPTIONS
   -h, --help                Show help
 
 ENV (alternative to flags)
-  SS_PORT, SS_PASSWORD, SS_METHOD, SS_VERSION
+  SS_PORT, SS_PASSWORD, SS_METHOD, SS_VERSION, SS_MODE
 
 UPGRADE BEHAVIOR
   - If an existing config is found at <config-dir>/config.json, and you do NOT explicitly
@@ -58,6 +58,17 @@ require_root() {
   if [[ ${EUID:-0} -ne 0 ]]; then
     die "Run as root (use: sudo bash -s -- ...)"
   fi
+}
+
+validate_install_inputs() {
+  local bin_dir="$1" config_dir="$2" user="$3"
+
+  [[ "$bin_dir" == /* && "$bin_dir" != "/" && "$bin_dir" =~ ^[A-Za-z0-9_./:+-]+$ ]] ||
+    die "Invalid --bin-dir (must be a safe absolute path): $bin_dir"
+  [[ "$config_dir" == /* && "$config_dir" != "/" && "$config_dir" =~ ^[A-Za-z0-9_./:+-]+$ ]] ||
+    die "Invalid --config-dir (must be a safe absolute path): $config_dir"
+  [[ "$user" =~ ^[a-z_][a-z0-9_-]*[$]?$ ]] ||
+    die "Invalid --user: $user"
 }
 
 install_deps() {
@@ -121,32 +132,25 @@ maybe_verify_sha256_from_release() {
   local sha_url
   sha_url="$(jq -r --arg n "${tar_name}.sha256" '.assets[]? | select(.name == $n) | .browser_download_url' <<<"$release_json" | head -n1)"
   if [[ -z "$sha_url" || "$sha_url" == "null" ]]; then
-    sha_url="$(jq -r '.assets[]? | select(.name | endswith(".sha256")) | .browser_download_url' <<<"$release_json" | head -n1)"
-  fi
-
-  if [[ -z "$sha_url" || "$sha_url" == "null" ]]; then
-    log_warn "该 release 未找到 .sha256 资产，继续安装但不做校验"
+    log_warn "该 release 未找到 ${tar_name}.sha256，继续安装但不做校验"
     return 0
   fi
 
-  local tmp_sha tmp_one
+  local tmp_sha
   tmp_sha="$(mktemp)"
-  tmp_one="$(mktemp)"
 
   if ! curl -fsSL "$sha_url" -o "$tmp_sha"; then
     log_warn "下载 sha256 文件失败，继续安装但不做校验"
-    rm -f "$tmp_sha" "$tmp_one"
+    rm -f "$tmp_sha"
     return 0
   fi
 
   if ! command -v sha256sum >/dev/null 2>&1; then
     log_warn "系统缺少 sha256sum，无法校验"
-    rm -f "$tmp_sha" "$tmp_one"
+    rm -f "$tmp_sha"
     return 0
   fi
 
-  # The sha256 file may contain multiple entries and varying formats.
-  # We attempt to find a matching line for the downloaded tarball name.
   local expected actual
   expected="$(awk -v n="$tar_name" '
     $2 == n || $2 == "*" n || $2 == "./" n || $2 == "*./" n { print $1; exit }
@@ -156,7 +160,7 @@ maybe_verify_sha256_from_release() {
 
   if [[ -z "$expected" ]]; then
     log_warn "sha256 文件中未找到 ${tar_name} 的条目，继续安装但不做校验"
-    rm -f "$tmp_sha" "$tmp_one"
+    rm -f "$tmp_sha"
     return 0
   fi
 
@@ -165,12 +169,43 @@ maybe_verify_sha256_from_release() {
     log_warn "sha256 校验失败：${tar_name}"
     echo "    expected: ${expected}" >&2
     echo "    actual:   ${actual}" >&2
-    rm -f "$tmp_sha" "$tmp_one"
+    rm -f "$tmp_sha"
     exit 1
   fi
 
   log_ok "sha256 校验通过"
-  rm -f "$tmp_sha" "$tmp_one"
+  rm -f "$tmp_sha"
+}
+
+validate_extracted_binary() {
+  local binary="$1"
+  [[ -f "$binary" && -x "$binary" ]] || die "Downloaded archive does not contain an executable ssserver"
+  "$binary" --version >/dev/null 2>&1 || die "Downloaded ssserver cannot run on this system"
+}
+
+generate_password() {
+  local method="$1" bytes=24
+  case "$method" in
+    2022-blake3-aes-128-gcm) bytes=16 ;;
+    2022-blake3-aes-256-gcm|2022-blake3-chacha20-poly1305) bytes=32 ;;
+  esac
+  openssl rand -base64 "$bytes" | tr -d '\n'
+}
+
+validate_password_for_method() {
+  local method="$1" password="$2" expected_bytes decoded_bytes
+  case "$method" in
+    2022-blake3-aes-128-gcm) expected_bytes=16 ;;
+    2022-blake3-aes-256-gcm|2022-blake3-chacha20-poly1305) expected_bytes=32 ;;
+    *) return 0 ;;
+  esac
+
+  need_cmd base64
+  if ! decoded_bytes="$(printf '%s' "$password" | base64 -d 2>/dev/null | wc -c)"; then
+    die "Password for ${method} must be valid base64 encoding ${expected_bytes} bytes"
+  fi
+  [[ "$decoded_bytes" == "$expected_bytes" ]] ||
+    die "Password for ${method} must decode to ${expected_bytes} bytes (got ${decoded_bytes})"
 }
 
 ensure_user() {
@@ -298,20 +333,33 @@ cleanup_tmp() {
 }
 
 port_is_listening() {
-  local port="$1"
+  local port="$1" mode="$2" tcp_ok=1 udp_ok=1
 
   if command -v ss >/dev/null 2>&1; then
-    ss -lntup 2>/dev/null | grep -Eq ":${port}\\b"
-    return $?
+    ss -H -ltn 2>/dev/null | grep -Eq ":${port}[[:space:]]" && tcp_ok=0
+    ss -H -lun 2>/dev/null | grep -Eq ":${port}[[:space:]]" && udp_ok=0
+  elif command -v netstat >/dev/null 2>&1; then
+    netstat -lnt 2>/dev/null | grep -Eq ":${port}[[:space:]]" && tcp_ok=0
+    netstat -lnu 2>/dev/null | grep -Eq ":${port}[[:space:]]" && udp_ok=0
+  else
+    log_warn "未找到 ss/netstat，跳过监听端口探测，仅依赖 systemd 状态判断"
+    return 2
   fi
 
-  if command -v netstat >/dev/null 2>&1; then
-    netstat -lntup 2>/dev/null | grep -Eq ":${port}[[:space:]]"
-    return $?
-  fi
+  case "$mode" in
+    tcp_only) return "$tcp_ok" ;;
+    udp_only) return "$udp_ok" ;;
+    tcp_and_udp) (( tcp_ok == 0 && udp_ok == 0 )) ;;
+  esac
+}
 
-  log_warn "未找到 ss/netstat，跳过监听端口探测，仅依赖 systemd 状态判断"
-  return 2
+format_uri_host() {
+  local host="$1"
+  if [[ "$host" == *:* && "$host" != \[*\] ]]; then
+    printf '[%s]\n' "$host"
+  else
+    printf '%s\n' "$host"
+  fi
 }
 
 dump_process_diagnostics() {
@@ -331,7 +379,7 @@ main() {
   local bin_dir="/usr/local/bin"
   local config_dir="/etc/shadowsocks"
   local user="shadowsocks"
-  local mode=""
+  local mode="${SS_MODE:-}"
   local skip_sha256="0"
 
   local explicit_port="0"
@@ -342,6 +390,7 @@ main() {
   [[ -n "${SS_PORT:-}" ]] && explicit_port="1"
   [[ -n "${SS_PASSWORD:-}" ]] && explicit_password="1"
   [[ -n "${SS_METHOD:-}" ]] && explicit_method="1"
+  [[ -n "${SS_MODE:-}" ]] && explicit_mode="1"
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -365,6 +414,8 @@ main() {
   log_info "Installer version: ${SCRIPT_VERSION}"
   require_root
   need_cmd uname
+
+  validate_install_inputs "$bin_dir" "$config_dir" "$user"
 
   install_deps
   need_cmd curl
@@ -400,11 +451,12 @@ main() {
 
   if [[ -z "$password" ]]; then
     need_cmd openssl
-    password="$(openssl rand -base64 24 | tr -d '\n')"
+    password="$(generate_password "$method")"
   fi
 
   if [[ "$method" == 2022-* ]]; then
-    log_info "检测到 SS2022 方法：${method}（建议 password 使用对应长度 key 的 base64）"
+    validate_password_for_method "$method" "$password"
+    log_info "检测到 SS2022 方法：${method}（password 长度校验通过）"
   fi
 
   if [[ "$mode" != "tcp_and_udp" && "$mode" != "tcp_only" && "$mode" != "udp_only" ]]; then
@@ -443,8 +495,10 @@ main() {
   maybe_verify_sha256_from_release "${tmp_dir}/${tar_name}" "$tar_name" "$release_json" "$skip_sha256"
 
   tar -C "$tmp_dir" -xJf "${tmp_dir}/${tar_name}"
+  validate_extracted_binary "${tmp_dir}/ssserver"
 
   local ss_bin="${bin_dir%/}/ssserver"
+  mkdir -p "$bin_dir"
   install -m 0755 "${tmp_dir}/ssserver" "$ss_bin"
   log_ok "ssserver 已安装到：${ss_bin}"
 
@@ -516,7 +570,11 @@ main() {
   tries=10
   listen_result=1
   while (( tries > 0 )); do
-    if port_is_listening "$port"; then
+    if ! systemctl is-active --quiet "$service_name"; then
+      listen_result=1
+      break
+    fi
+    if port_is_listening "$port" "$mode"; then
       listen_result=0
       log_ok "服务运行正常（已监听端口 ${port}）"
       break
@@ -530,7 +588,7 @@ main() {
     tries=$((tries - 1))
   done
 
-  if [[ "$listen_result" == "1" && "$tries" == "0" ]]; then
+  if [[ "$listen_result" == "1" ]]; then
     log_warn "服务看似已启动，但未监听端口：${port}"
     systemctl status shadowsocks-server.service --no-pager -l >&2 || true
     journalctl -u shadowsocks-server.service -n 200 --no-pager -l >&2 || true
@@ -538,7 +596,7 @@ main() {
     exit 1
   fi
 
-  local hostname_short node_name public_ip ip_fallback
+  local hostname_short node_name public_ip ip_fallback uri_host
   hostname_short="$(hostname -s 2>/dev/null || hostname 2>/dev/null || echo "ss")"
   node_name="$(printf '%s' "$hostname_short" | tr ' ' '-' | tr -cd 'A-Za-z0-9._~-')"
   [[ -n "$node_name" ]] || node_name="ss"
@@ -561,6 +619,7 @@ main() {
   else
     log_warn "无法自动获取公网 IP，请手动替换 SS 链接中的服务器地址"
   fi
+  uri_host="$(format_uri_host "$ip_fallback")"
 
   echo
   echo "====================================== 配置信息 ======================================"
@@ -578,12 +637,12 @@ main() {
     userinfo_b64="$(printf '%s' "${method}:${password}" | base64 -w 0 2>/dev/null || printf '%s' "${method}:${password}" | base64 2>/dev/null | tr -d '\n')"
     userinfo_b64="$(printf '%s' "$userinfo_b64" | tr '+/' '-_' | tr -d '=')"
     if [[ -n "$userinfo_b64" ]]; then
-      ss_link="ss://${userinfo_b64}@${ip_fallback}:${port}#${node_name}"
+      ss_link="ss://${userinfo_b64}@${uri_host}:${port}#${node_name}"
     fi
   fi
 
   if [[ -z "$ss_link" ]]; then
-    ss_link="ss://${method}:${password}@${ip_fallback}:${port}#${node_name}"
+    ss_link="ss://${method}:${password}@${uri_host}:${port}#${node_name}"
   fi
 
   echo "SS链接: ${ss_link}"
@@ -600,4 +659,6 @@ main() {
   log_ok "=== 一键安装完成 ==="
 }
 
-main "$@"
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  main "$@"
+fi

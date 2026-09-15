@@ -80,6 +80,7 @@ bash install.sh --help
 - `--method` / `SS_METHOD`（默认 `aes-128-gcm`）
 - `--version` / `SS_VERSION`（`latest` 或 `v1.22.0` 这种 tag）
 - `--mode`：传输模式（`tcp_and_udp` / `tcp_only` / `udp_only`）
+- `SS_MODE`：通过环境变量设置传输模式
 - `--no-udp`：禁用 UDP（等价于 `--mode tcp_only`）
 - `--mode udp_only`：只启用 UDP
 
@@ -92,6 +93,8 @@ bash install.sh --help
 本脚本安装的是 `shadowsocks-rust`（`ssserver`），它支持多种加密方法。你可以通过 `--method` 切换。
 
 SS2022 常用示例（请确保你的客户端也支持对应 method）：
+
+未显式传入 `--password` 时，安装器会按所选 SS2022 方法自动生成正确长度的 base64 密钥；显式传入或从旧配置继承的密钥会在启动服务前校验。
 
 - `2022-blake3-aes-128-gcm`（建议密码用 16 字节 key 的 base64）：
 

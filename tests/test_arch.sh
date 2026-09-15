@@ -5,7 +5,7 @@ set -euo pipefail
 repo_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 # Load installer functions without running main.
-source <(sed '/^main "\$@"$/d' "${repo_dir}/install.sh")
+source "${repo_dir}/install.sh"
 
 uname() { printf '%s\n' 'x86_64'; }
 [[ "$(get_arch)" == "x86_64-unknown-linux-musl" ]]
