@@ -109,12 +109,37 @@ github_api() {
 }
 
 get_latest_version() {
-  github_api "https://api.github.com/repos/shadowsocks/shadowsocks-rust/releases/latest" | jq -r .tag_name
+  local tag release_url
+  if tag="$(github_api "https://api.github.com/repos/shadowsocks/shadowsocks-rust/releases/latest" | jq -er '.tag_name | select(type == "string" and length > 0)')"; then
+    printf '%s\n' "$tag"
+    return 0
+  fi
+
+  log_warn "GitHub API 不可用，改用官方 Release 页面获取最新版本"
+  release_url="$(curl -fsSL --connect-timeout 15 --max-time 60 -o /dev/null -w '%{url_effective}' \
+    'https://github.com/shadowsocks/shadowsocks-rust/releases/latest')" || return 1
+  [[ "$release_url" == https://github.com/shadowsocks/shadowsocks-rust/releases/tag/* ]] || return 1
+  tag="${release_url##*/}"
+  [[ "$tag" =~ ^[A-Za-z0-9._-]+$ ]] || return 1
+  printf '%s\n' "$tag"
 }
 
 get_release_by_tag() {
-  local tag="$1"
-  github_api "https://api.github.com/repos/shadowsocks/shadowsocks-rust/releases/tags/${tag}"
+  local tag="$1" release_json assets_html
+  [[ "$tag" =~ ^[A-Za-z0-9._-]+$ ]] || return 1
+  if release_json="$(github_api "https://api.github.com/repos/shadowsocks/shadowsocks-rust/releases/tags/${tag}" | jq -e 'select(.assets | type == "array")')"; then
+    printf '%s\n' "$release_json"
+    return 0
+  fi
+
+  log_warn "GitHub API 不可用，改用官方 Release 页面获取下载地址"
+  assets_html="$(curl -fsSL --connect-timeout 15 --max-time 60 \
+    "https://github.com/shadowsocks/shadowsocks-rust/releases/expanded_assets/${tag}")" || return 1
+  jq -Rse --arg tag "$tag" '
+    {tag_name: $tag, assets: ([. | scan("href=\"(/shadowsocks/shadowsocks-rust/releases/download/[^\"]+)\"") | .[0]
+      | select(startswith("/shadowsocks/shadowsocks-rust/releases/download/" + $tag + "/"))
+      | {name: (split("/") | last), browser_download_url: ("https://github.com" + .)}] | unique_by(.name))}
+    | select(.assets | length > 0)' <<<"$assets_html"
 }
 
 download_release_asset() {
