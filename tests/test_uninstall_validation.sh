@@ -23,6 +23,6 @@ if output="$("${run_uninstaller[@]}" "${repo_dir}/uninstall.sh" --config-dir "$t
   printf 'expected unsafe metadata to be rejected\n' >&2
   exit 1
 fi
-grep -q 'Invalid --service or metadata service' <<<"$output"
+grep -Eq 'Invalid install metadata|Unsafe metadata' <<<"$output"
 
 printf '%s\n' 'uninstall validation tests passed'

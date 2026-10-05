@@ -31,3 +31,8 @@ github_api() { printf '%s' '{"tag_name":"v1.25.0","assets":[]}'; }
 [[ "$(get_latest_version)" == 'v1.25.0' ]]
 jq -e '.tag_name == "v1.25.0"' <<<"$(get_release_by_tag v1.25.0)" >/dev/null
 printf '%s\n' 'release API fallback tests passed'
+for api_response in 'not-json' '{"assets":[]}' '{"assets":[{"name":"other.aarch64-unknown-linux-musl.tar.xz"}]}'; do
+  github_api() { printf '%s' "$api_response"; }
+  curl() { printf '%s' '<a href="/shadowsocks/shadowsocks-rust/releases/download/v1.25.0/test.x86_64-unknown-linux-musl.tar.xz">asset</a>'; }
+  jq -e '.assets[0].name == "test.x86_64-unknown-linux-musl.tar.xz"' <<<"$(get_release_by_tag v1.25.0 x86_64-unknown-linux-musl)" >/dev/null
+done

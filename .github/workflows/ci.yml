@@ -15,7 +15,10 @@ jobs:
       - name: Install ShellCheck
         run: sudo apt-get update && sudo apt-get install -y shellcheck
       - name: Check shell syntax
-        run: bash -n install.sh uninstall.sh tests/*.sh
+        run: |
+          for script in install.sh uninstall.sh tests/*.sh; do
+            bash -n "$script"
+          done
       - name: Run ShellCheck
         run: shellcheck -S style install.sh uninstall.sh tests/*.sh
       - name: Run tests

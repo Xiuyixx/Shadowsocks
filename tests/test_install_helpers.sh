@@ -40,20 +40,28 @@ assert_fails validate_password_for_method '2022-blake3-aes-256-gcm' 'not-base64'
 
 ss() {
   case "$*" in
-    *-ltn*) printf 'LISTEN 0 1024 0.0.0.0:8388 0.0.0.0:*\n' ;;
+    *-ltn*) printf 'LISTEN 0 1024 0.0.0.0:8388 0.0.0.0:* users:(("ssserver",pid=123,fd=3))\n' ;;
     *-lun*) return 0 ;;
   esac
 }
-port_is_listening 8388 tcp_only
-assert_fails port_is_listening 8388 udp_only
-assert_fails port_is_listening 8388 tcp_and_udp
+port_is_listening 8388 tcp_only 123
+assert_fails port_is_listening 8388 udp_only 123
+assert_fails port_is_listening 8388 tcp_and_udp 123
 
 ss() {
   case "$*" in
-    *-ltn*) printf 'LISTEN 0 1024 0.0.0.0:8388 0.0.0.0:*\n' ;;
-    *-lun*) printf 'UNCONN 0 0 0.0.0.0:8388 0.0.0.0:*\n' ;;
+    *-ltn*) printf 'LISTEN 0 1024 0.0.0.0:8388 0.0.0.0:* users:(("ssserver",pid=123,fd=3))\n' ;;
+    *-lun*) printf 'UNCONN 0 0 0.0.0.0:8388 0.0.0.0:* users:(("ssserver",pid=123,fd=3))\n' ;;
   esac
 }
-port_is_listening 8388 tcp_and_udp
+port_is_listening 8388 tcp_and_udp 123
 
 printf '%s\n' 'installer helper tests passed'
+assert_fails validate_install_inputs /usr/local/bin /etc/../etc root
+assert_fails validate_install_inputs /usr/local/bin /tmp/../usr shadowsocks
+assert_fails port_is_listening 8388 tcp_only 999
+systemctl() { case "$1" in is-active) return 0 ;; show) echo 123 ;; esac; }
+sleep() { :; }
+wait_ready 8388 tcp_and_udp
+systemctl() { case "$1" in is-active) return 0 ;; show) echo 999 ;; esac; }
+assert_fails wait_ready 8388 tcp_only

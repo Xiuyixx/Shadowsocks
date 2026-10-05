@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-SCRIPT_VERSION="2026-09-15"
-INSTALL_META_VERSION="1"
+SCRIPT_VERSION="2026-10-05"
+INSTALL_META_VERSION="2"
 
 usage() {
   cat <<'EOF'
@@ -60,15 +60,52 @@ require_root() {
   fi
 }
 
-validate_install_inputs() {
-  local bin_dir="$1" config_dir="$2" user="$3"
+normalize_path() {
+  [[ "$1" == /* && "$1" =~ ^[A-Za-z0-9_./:+-]+$ ]] || die "Invalid absolute path: $1"
+  realpath -m -- "$1"
+}
 
-  [[ "$bin_dir" == /* && "$bin_dir" != "/" && "$bin_dir" =~ ^[A-Za-z0-9_./:+-]+$ ]] ||
-    die "Invalid --bin-dir (must be a safe absolute path): $bin_dir"
-  [[ "$config_dir" == /* && "$config_dir" != "/" && "$config_dir" =~ ^[A-Za-z0-9_./:+-]+$ ]] ||
-    die "Invalid --config-dir (must be a safe absolute path): $config_dir"
-  [[ "$user" =~ ^[a-z_][a-z0-9_-]*[$]?$ ]] ||
-    die "Invalid --user: $user"
+# Validate one JSON object before reading any fields. Legacy v1 paths are
+# canonicalized in memory only; never rewrite untrusted metadata on disk.
+read_install_metadata() {
+  local path="$1" metadata field value
+  metadata="$(jq -se 'length == 1 and (.[0] | type == "object")' "$path")" || die "Invalid install metadata: expected one object"
+  [[ "$metadata" == true ]] || die "Invalid install metadata: expected one object"
+  metadata="$(jq -e '(.metaVersion == "1" or .metaVersion == "2") and
+    ([.ssserverPath, .configDir, .configPath, .runUser, .serviceName] | all(.[]; type == "string")) and
+    .serviceName == "shadowsocks-server.service" and
+    (.metaVersion == "1" or (.createdUser | type == "boolean"))' "$path")" || die "Invalid install metadata schema"
+  metadata="$(cat -- "$path")"
+  if [[ "$(jq -r .metaVersion <<<"$metadata")" == 1 ]]; then
+    for field in ssserverPath configDir configPath; do
+      value="$(jq -r --arg field "$field" '.[$field]' <<<"$metadata")"
+      [[ ! -L "$value" ]] || die "Symlink metadata path refused"
+      value="$(normalize_path "$value")" || return 1
+      metadata="$(jq --arg field "$field" --arg value "$value" '.[$field]=$value' <<<"$metadata")"
+    done
+  fi
+  printf '%s\n' "$metadata"
+}
+
+safe_directory() {
+  case "$1" in
+    /|/etc|/usr|/usr/local|/var|/home|/root|/tmp|/run|/opt|/bin|/sbin|/lib|/lib64|/boot|/dev|/proc|/sys|/etc/systemd|/etc/systemd/system) return 1 ;;
+  esac
+  case "$1" in /dev/*|/proc/*|/sys/*|/boot/*) return 1 ;; esac
+}
+
+validate_install_inputs() {
+  local bin_dir config_dir user="$3"
+  [[ ! -L "$1" && ! -L "$2" ]] || die "Symlink install directory refused"
+  bin_dir="$(normalize_path "$1")" || return 1
+  config_dir="$(normalize_path "$2")" || return 1
+  if ! safe_directory "$bin_dir" || ! safe_directory "$config_dir"; then die "Unsafe install directory"; fi
+  [[ "$bin_dir" != "$config_dir" && "$config_dir" != "$bin_dir/"* && "$bin_dir" != "$config_dir/"* ]] || die "Overlapping installation directories"
+  [[ "$user" =~ ^[a-z_][a-z0-9_-]*[$]?$ ]] || die "Invalid --user: $user"
+  case "$user" in root|daemon|nobody|bin|sys|sync|www-data|sshd|systemd-*) die "Critical service user: $user" ;; esac
+  if id -u "$user" >/dev/null 2>&1; then
+    [[ "$(id -u "$user")" != 0 ]] || die "Cannot run as UID 0"
+  fi
 }
 
 install_deps() {
@@ -101,7 +138,7 @@ get_arch() {
 
 github_api() {
   local url="$1"
-  curl -fsSL \
+  curl -fsSL --connect-timeout 15 --max-time 90 --retry 3 --retry-delay 1 --retry-max-time 300 \
     -H 'Accept: application/vnd.github+json' \
     -H 'X-GitHub-Api-Version: 2022-11-28' \
     -H 'User-Agent: SSAes128gcm-installer' \
@@ -116,7 +153,7 @@ get_latest_version() {
   fi
 
   log_warn "GitHub API 不可用，改用官方 Release 页面获取最新版本"
-  release_url="$(curl -fsSL --connect-timeout 15 --max-time 60 -o /dev/null -w '%{url_effective}' \
+  release_url="$(curl -fsSL --connect-timeout 15 --max-time 90 --retry 3 --retry-delay 1 --retry-max-time 300 -o /dev/null -w '%{url_effective}' \
     'https://github.com/shadowsocks/shadowsocks-rust/releases/latest')" || return 1
   [[ "$release_url" == https://github.com/shadowsocks/shadowsocks-rust/releases/tag/* ]] || return 1
   tag="${release_url##*/}"
@@ -125,15 +162,16 @@ get_latest_version() {
 }
 
 get_release_by_tag() {
-  local tag="$1" release_json assets_html
+  local tag="$1" arch="${2:-}" release_json assets_html
   [[ "$tag" =~ ^[A-Za-z0-9._-]+$ ]] || return 1
-  if release_json="$(github_api "https://api.github.com/repos/shadowsocks/shadowsocks-rust/releases/tags/${tag}" | jq -e 'select(.assets | type == "array")')"; then
+  if release_json="$(github_api "https://api.github.com/repos/shadowsocks/shadowsocks-rust/releases/tags/${tag}" | jq -e --arg arch "$arch" --arg tag "$tag" 'select(.assets | type == "array" and length > 0) | select(all(.assets[]; (.name | type == "string") and (.browser_download_url | type == "string") and .browser_download_url == ("https://github.com/shadowsocks/shadowsocks-rust/releases/download/" + $tag + "/" + .name))) | select($arch == "" or any(.assets[]; (.name // "") | endswith("." + $arch + ".tar.xz")))')"; then
+    release_json="$(jq --arg tag "$tag" '.tag_name=$tag' <<<"$release_json")"
     printf '%s\n' "$release_json"
     return 0
   fi
 
   log_warn "GitHub API 不可用，改用官方 Release 页面获取下载地址"
-  assets_html="$(curl -fsSL --connect-timeout 15 --max-time 60 \
+  assets_html="$(curl -fsSL --connect-timeout 15 --max-time 90 --retry 3 --retry-delay 1 --retry-max-time 300 \
     "https://github.com/shadowsocks/shadowsocks-rust/releases/expanded_assets/${tag}")" || return 1
   jq -Rse --arg tag "$tag" '
     {tag_name: $tag, assets: ([. | scan("href=\"(/shadowsocks/shadowsocks-rust/releases/download/[^\"]+)\"") | .[0]
@@ -144,62 +182,32 @@ get_release_by_tag() {
 
 download_release_asset() {
   local url="$1" out="$2"
-  curl -fL --retry 3 --retry-delay 1 -o "$out" "$url"
+  curl -fL --connect-timeout 15 --max-time 300 --retry 3 --retry-delay 1 --retry-max-time 300 -o "$out" "$url"
+}
+
+validate_asset() {
+  local name="$1" url="$2" tag="$3"
+  [[ "$name" =~ ^[A-Za-z0-9._+-]+$ && "$url" == "https://github.com/shadowsocks/shadowsocks-rust/releases/download/${tag}/${name}" ]] || die "Unsafe release asset: $name"
 }
 
 maybe_verify_sha256_from_release() {
-  local tar_path="$1" tar_name="$2" release_json="$3" skip="$4"
-  if [[ "$skip" == "1" ]]; then
-    log_warn "跳过 sha256 校验（--skip-sha256）"
-    return 0
-  fi
-
-  local sha_url
+  local tar_path="$1" tar_name="$2" release_json="$3" skip="$4" sha_url expected actual tmp_sha
+  if [[ "$skip" == 1 ]]; then log_warn "跳过 SHA256 校验（--skip-sha256）"; return; fi
+  need_cmd sha256sum
   sha_url="$(jq -r --arg n "${tar_name}.sha256" '.assets[]? | select(.name == $n) | .browser_download_url' <<<"$release_json" | head -n1)"
-  if [[ -z "$sha_url" || "$sha_url" == "null" ]]; then
-    log_warn "该 release 未找到 ${tar_name}.sha256，继续安装但不做校验"
-    return 0
-  fi
-
-  local tmp_sha
-  tmp_sha="$(mktemp)"
-
-  if ! curl -fsSL "$sha_url" -o "$tmp_sha"; then
-    log_warn "下载 sha256 文件失败，继续安装但不做校验"
-    rm -f "$tmp_sha"
-    return 0
-  fi
-
-  if ! command -v sha256sum >/dev/null 2>&1; then
-    log_warn "系统缺少 sha256sum，无法校验"
-    rm -f "$tmp_sha"
-    return 0
-  fi
-
-  local expected actual
+  [[ -n "$sha_url" && "$sha_url" != null ]] || die "Missing ${tar_name}.sha256 (use --skip-sha256 only if intentional)"
+  validate_asset "${tar_name}.sha256" "$sha_url" "$(jq -r .tag_name <<<"$release_json")"
+  tmp_sha="${tar_path}.checksum"
+  curl -fsSL --connect-timeout 15 --max-time 90 --retry 3 --retry-delay 1 --retry-max-time 300 -o "$tmp_sha" "$sha_url" || die "Checksum download failed"
   expected="$(awk -v n="$tar_name" '
-    $2 == n || $2 == "*" n || $2 == "./" n || $2 == "*./" n { print $1; exit }
-    $2 ~ ("/" n "$") { print $1; exit }
-    { next }
-  ' "$tmp_sha" 2>/dev/null || true)"
-
-  if [[ -z "$expected" ]]; then
-    log_warn "sha256 文件中未找到 ${tar_name} 的条目，继续安装但不做校验"
-    rm -f "$tmp_sha"
-    return 0
-  fi
-
-  actual="$(sha256sum "$tar_path" | awk '{print $1}')"
-  if [[ "$expected" != "$actual" ]]; then
-    log_warn "sha256 校验失败：${tar_name}"
-    echo "    expected: ${expected}" >&2
-    echo "    actual:   ${actual}" >&2
-    rm -f "$tmp_sha"
-    exit 1
-  fi
-
-  log_ok "sha256 校验通过"
-  rm -f "$tmp_sha"
+    NF == 1 { pure=$1; count++; next }
+    $2 == n || $2 == "*" n || $2 == "./" n || $2 == "*./" n { matched=$1; matches++ }
+    END { if (matches == 1) print matched; else if (matches == 0 && count == 1 && NR == 1) print pure }
+  ' "$tmp_sha")"
+  [[ "$expected" =~ ^[[:xdigit:]]{64}$ ]] || die "Missing, ambiguous or malformed SHA256 digest"
+  actual="$(sha256sum "$tar_path")"; actual="${actual%% *}"
+  [[ "${expected,,}" == "$actual" ]] || die "SHA256 mismatch: $tar_name"
+  rm -f -- "$tmp_sha"
 }
 
 validate_extracted_binary() {
@@ -237,6 +245,7 @@ ensure_user() {
   local user="$1"
   if ! id -u "$user" >/dev/null 2>&1; then
     useradd --system --no-create-home --shell /usr/sbin/nologin "$user"
+    TX_CREATED_USER=1
   fi
 }
 
@@ -247,29 +256,21 @@ write_config() {
 
   # Write JSON via jq to avoid escaping/format issues.
   local tmp_config
-  tmp_config="$(mktemp)"
+  tmp_config="$(mktemp "${config_path}.tmp.XXXXXX")"
+  TX_TEMPS+=("$tmp_config" "${tmp_config}.base")
 
   # NOTE: keep config format compatible across shadowsocks-rust versions.
   # Some versions expect `server` to be a string (not an array).
-  jq -n \
-    --arg server "0.0.0.0" \
-    --argjson server_port "$port" \
-    --arg password "$password" \
-    --arg method "$method" \
-    --argjson timeout 300 \
-    --argjson fast_open false \
-    --arg nameserver "1.1.1.1" \
-    --arg mode "$mode" \
-    '{
-      server: $server,
-      server_port: $server_port,
-      password: $password,
-      method: $method,
-      timeout: $timeout,
-      fast_open: $fast_open,
-      nameserver: $nameserver,
-      mode: $mode
-    }' > "$tmp_config"
+  local source_config="${7:-}"
+  if [[ -n "$source_config" && -f "$source_config" ]]; then
+    jq -se 'length == 1 and (.[0] | type == "object")' "$source_config" >/dev/null || die "Malformed existing config"
+  else
+    source_config="${tmp_config}.base"
+    printf '%s\n' '{"server":"0.0.0.0","timeout":300,"fast_open":false,"nameserver":"1.1.1.1"}' > "$source_config"
+  fi
+  jq --argjson port "$port" --arg password "$password" --arg method "$method" --arg mode "$mode" \
+    '.server_port=$port | .password=$password | .method=$method | .mode=$mode' "$source_config" > "$tmp_config"
+  [[ "$source_config" != "${tmp_config}.base" ]] || rm -f -- "$source_config"
 
   install -m 0640 -o root -g "$user" "$tmp_config" "$config_path"
   rm -f "$tmp_config"
@@ -323,7 +324,8 @@ write_install_meta() {
   need_cmd jq
 
   local tmp_meta
-  tmp_meta="$(mktemp)"
+  tmp_meta="$(mktemp "${meta_path}.tmp.XXXXXX")"
+  TX_TEMPS+=("$tmp_meta")
   jq -n \
     --arg installer_version "$SCRIPT_VERSION" \
     --arg meta_version "$INSTALL_META_VERSION" \
@@ -333,9 +335,11 @@ write_install_meta() {
     --arg user "$user" \
     --arg service_name "$service_name" \
     --arg ss_version "$version" \
+    --argjson created_user "${TX_USER_OWNED:-false}" \
     --arg installed_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
     '{
       metaVersion: $meta_version,
+      createdUser: $created_user,
       installerVersion: $installer_version,
       installedAt: $installed_at,
       serviceName: $service_name,
@@ -350,32 +354,78 @@ write_install_meta() {
   rm -f "$tmp_meta"
 }
 
-cleanup_tmp() {
-  local dir="${1:-}"
-  if [[ -n "$dir" && -d "$dir" ]]; then
-    rm -rf "$dir"
-  fi
+# All transaction state is global: EXIT traps must not depend on expired main locals.
+TX_DIR=""; TX_ACTIVE=0; TX_COMMITTED=0; TX_CREATED_USER=0; TX_USER_OWNED=false
+TX_FILES=(); TX_EXISTED=(); TX_RUNNING=0; TX_ENABLED=disabled; TX_USER=""; TX_CONFIG=""; TX_CONFIG_EXISTED=0
+
+atomic_replace() {
+  local source="$1" target="$2" temp
+  temp="$(mktemp "${target}.new.XXXXXX")"
+  TX_TEMPS+=("$temp")
+  cp -p -- "$source" "$temp" || return 1
+  mv -fT -- "$temp" "$target" || return 1
 }
 
-port_is_listening() {
-  local port="$1" mode="$2" tcp_ok=1 udp_ok=1
-
-  if command -v ss >/dev/null 2>&1; then
-    ss -H -ltn 2>/dev/null | grep -Eq ":${port}[[:space:]]" && tcp_ok=0
-    ss -H -lun 2>/dev/null | grep -Eq ":${port}[[:space:]]" && udp_ok=0
-  elif command -v netstat >/dev/null 2>&1; then
-    netstat -lnt 2>/dev/null | grep -Eq ":${port}[[:space:]]" && tcp_ok=0
-    netstat -lnu 2>/dev/null | grep -Eq ":${port}[[:space:]]" && udp_ok=0
-  else
-    log_warn "未找到 ss/netstat，跳过监听端口探测，仅依赖 systemd 状态判断"
-    return 2
+transaction_exit() {
+  local result="$?" i failed=0
+  trap - EXIT INT TERM HUP
+  set +e
+  if (( TX_ACTIVE && ! TX_COMMITTED )); then
+    log_warn "Installation failed (exit ${result}); restoring previous installation"
+    systemctl status shadowsocks-server.service --no-pager -l >&2
+    journalctl -u shadowsocks-server.service -n 50 --no-pager >&2
+    systemctl stop shadowsocks-server.service || failed=1
+    for i in "${!TX_FILES[@]}"; do
+      if [[ "${TX_EXISTED[i]}" == 1 ]]; then
+        atomic_replace "${TX_DIR}/backup/$i" "${TX_FILES[$i]}" || failed=1
+      else rm -f -- "${TX_FILES[$i]}" || failed=1; fi
+    done
+    if (( TX_CONFIG_EXISTED )); then
+      chmod "$TX_CONFIG_MODE" "$TX_CONFIG" || failed=1
+      chown "$TX_CONFIG_OWNER" "$TX_CONFIG" || failed=1
+    else rmdir -- "$TX_CONFIG" 2>/dev/null || true; fi
+    systemctl daemon-reload || failed=1
+    case "$TX_ENABLED" in
+      enabled) systemctl enable shadowsocks-server.service || failed=1 ;;
+      enabled-runtime) systemctl disable shadowsocks-server.service; systemctl enable --runtime shadowsocks-server.service || failed=1 ;;
+      masked|masked-runtime) systemctl mask shadowsocks-server.service || failed=1 ;;
+      *) systemctl disable shadowsocks-server.service || failed=1 ;;
+    esac
+    if (( TX_RUNNING )); then systemctl start shadowsocks-server.service || failed=1; fi
+    if (( TX_CREATED_USER )); then userdel "$TX_USER" || failed=1; fi
+    (( failed == 0 )) || log_warn "Rollback incomplete; backups preserved at ${TX_DIR}; inspect service and files manually"
+    (( result != 0 )) || result=1
   fi
+  for i in "${TX_TEMPS[@]}"; do rm -f -- "$i"; done
+  if [[ "$failed" == 0 && "$TX_DIR" == /tmp/shadowsocks-install.* && -d "$TX_DIR" ]]; then rm -rf -- "$TX_DIR"; fi
+  exit "$result"
+}
+TX_TEMPS=()
 
-  case "$mode" in
-    tcp_only) return "$tcp_ok" ;;
-    udp_only) return "$udp_ok" ;;
-    tcp_and_udp) (( tcp_ok == 0 && udp_ok == 0 )) ;;
-  esac
+port_is_listening() {
+  local port="$1" mode="$2" pid="${3:-}" protocol output
+  [[ "$pid" =~ ^[1-9][0-9]*$ ]] || return 1
+  for protocol in tcp udp; do
+    [[ "$mode" == tcp_only && "$protocol" == udp ]] && continue
+    [[ "$mode" == udp_only && "$protocol" == tcp ]] && continue
+    if [[ "$protocol" == tcp ]]; then output="$(ss -H -ltnp 2>/dev/null)"; else output="$(ss -H -lunp 2>/dev/null)"; fi
+    awk -v port="$port" -v pid="$pid" '$4 ~ (":" port "$") && index($0, "pid=" pid ",") {found=1} END {exit !found}' <<<"$output" || return 1
+  done
+}
+
+wait_ready() {
+  local port="$1" mode="$2" pid previous="" stable=0 tries
+  for (( tries=0; tries<30; tries++ )); do
+    systemctl is-active --quiet shadowsocks-server.service || return 1
+    pid="$(systemctl show -p MainPID --value shadowsocks-server.service)"
+    if port_is_listening "$port" "$mode" "$pid"; then
+      if [[ "$pid" == "$previous" ]]; then stable=$((stable+1)); else stable=1; fi
+      (( stable >= 4 )) && return 0
+    else stable=0; fi
+    previous="$pid"
+    sleep 0.5
+  done
+  return 1
 }
 
 format_uri_host() {
@@ -440,6 +490,9 @@ main() {
   require_root
   need_cmd uname
 
+  [[ ! -L "$bin_dir" && ! -L "$config_dir" ]] || die "Symlink install directory refused"
+  bin_dir="$(normalize_path "$bin_dir")"
+  config_dir="$(normalize_path "$config_dir")"
   validate_install_inputs "$bin_dir" "$config_dir" "$user"
 
   install_deps
@@ -449,20 +502,24 @@ main() {
   need_cmd tar
   need_cmd head
   need_cmd grep
+  need_cmd ss
+  need_cmd realpath
 
   local existing_config="${config_dir%/}/config.json"
-  if [[ -f "$existing_config" ]]; then
+  if [[ -e "$existing_config" ]]; then
+    [[ -f "$existing_config" && ! -L "$existing_config" ]] || die "Unsafe existing config"
+    jq -se 'length == 1 and (.[0] | type == "object" and ((.server // "0.0.0.0") | type == "string") and ((.server_port // 8388) | type == "number") and ((.password // "") | type == "string") and ((.method // "aes-128-gcm") | type == "string"))' "$existing_config" >/dev/null || die "Malformed existing config; refusing reset"
     if [[ "$explicit_port" == "0" ]]; then
-      port="$(jq -r '.server_port // empty' "$existing_config" 2>/dev/null || true)"
+      port="$(jq -r '.server_port // empty' "$existing_config" 2>/dev/null)"
     fi
     if [[ "$explicit_password" == "0" ]]; then
-      password="$(jq -r '.password // empty' "$existing_config" 2>/dev/null || true)"
+      password="$(jq -r '.password // empty' "$existing_config" 2>/dev/null)"
     fi
     if [[ "$explicit_method" == "0" ]]; then
-      method="$(jq -r '.method // empty' "$existing_config" 2>/dev/null || true)"
+      method="$(jq -r '.method // empty' "$existing_config" 2>/dev/null)"
     fi
     if [[ "$explicit_mode" == "0" ]]; then
-      mode="$(jq -r '.mode // empty' "$existing_config" 2>/dev/null || true)"
+      mode="$(jq -r '.mode // empty' "$existing_config" 2>/dev/null)"
     fi
     log_info "检测到已有配置：${existing_config}（未显式指定参数时将沿用原值）"
   fi
@@ -472,8 +529,12 @@ main() {
   : "${mode:=tcp_and_udp}"
 
   [[ "$port" =~ ^[0-9]+$ ]] || die "Invalid port: $port"
+  port=$((10#$port))
   (( port >= 1 && port <= 65535 )) || die "Port out of range: $port"
 
+  if [[ "$explicit_method" == 1 && "$explicit_password" == 0 && -f "$existing_config" && "$method" != "$(jq -r ' .method // empty' "$existing_config")" ]]; then
+    password=""
+  fi
   if [[ -z "$password" ]]; then
     need_cmd openssl
     password="$(generate_password "$method")"
@@ -498,128 +559,86 @@ main() {
   [[ -n "$version" && "$version" != "null" ]] || die "Failed to determine shadowsocks-rust version"
 
   local release_json
-  if ! release_json="$(get_release_by_tag "$version")"; then
+  if ! release_json="$(get_release_by_tag "$version" "$ss_arch")"; then
     die "Failed to fetch release metadata for tag: $version"
   fi
   log_ok "目标版本：${version}"
 
   local tar_url tar_name
-  tar_url="$(jq -r --arg arch "$ss_arch" '.assets[]? | select(.name | test("\\." + $arch + "\\.tar\\.xz$")) | .browser_download_url' <<<"$release_json" | head -n1)"
-  tar_name="$(jq -r --arg arch "$ss_arch" '.assets[]? | select(.name | test("\\." + $arch + "\\.tar\\.xz$")) | .name' <<<"$release_json" | head -n1)"
+  tar_url="$(jq -r --arg arch "$ss_arch" '.assets[]? | select(.name | endswith("." + $arch + ".tar.xz")) | .browser_download_url' <<<"$release_json" | head -n1)"
+  tar_name="$(jq -r --arg arch "$ss_arch" '.assets[]? | select(.name | endswith("." + $arch + ".tar.xz")) | .name' <<<"$release_json" | head -n1)"
 
   [[ -n "$tar_url" && "$tar_url" != "null" ]] || die "No release asset found for arch: ${ss_arch} (tag: ${version})"
   [[ -n "$tar_name" && "$tar_name" != "null" ]] || die "Failed to resolve release asset name (arch: ${ss_arch})"
 
-  local tmp_dir
-  tmp_dir="$(mktemp -d)"
-  trap 'cleanup_tmp "${tmp_dir:-}"' EXIT
+  validate_asset "$tar_name" "$tar_url" "$version"
+  TX_DIR="$(mktemp -d /tmp/shadowsocks-install.XXXXXX)"
+  trap transaction_exit EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  trap 'exit 129' HUP
+  download_release_asset "$tar_url" "${TX_DIR}/${tar_name}"
+  maybe_verify_sha256_from_release "${TX_DIR}/${tar_name}" "$tar_name" "$release_json" "$skip_sha256"
+  # Extract only the expected regular binary, not arbitrary archive paths or links.
+  [[ "$(tar -tJf "${TX_DIR}/${tar_name}" | grep -cxE '(\./)?ssserver')" == 1 ]] || die "Archive must contain exactly one ssserver"
+  local member
+  member="$(tar -tJf "${TX_DIR}/${tar_name}" | grep -xE '(\./)?ssserver')"
+  [[ "$(tar -tvJf "${TX_DIR}/${tar_name}" "$member")" == -* ]] || die "ssserver must be a regular file"
+  tar -xOJf "${TX_DIR}/${tar_name}" "$member" > "${TX_DIR}/ssserver"
+  chmod 755 "${TX_DIR}/ssserver"
+  validate_extracted_binary "${TX_DIR}/ssserver"
 
-  log_info "步骤 2/3：下载并安装 ssserver..."
-  log_info "Installing shadowsocks-rust ${version} (${ss_arch})"
-  download_release_asset "$tar_url" "${tmp_dir}/${tar_name}"
-  maybe_verify_sha256_from_release "${tmp_dir}/${tar_name}" "$tar_name" "$release_json" "$skip_sha256"
-
-  tar -C "$tmp_dir" -xJf "${tmp_dir}/${tar_name}"
-  validate_extracted_binary "${tmp_dir}/ssserver"
-
-  local ss_bin="${bin_dir%/}/ssserver"
-  mkdir -p "$bin_dir"
-  install -m 0755 "${tmp_dir}/ssserver" "$ss_bin"
-  log_ok "ssserver 已安装到：${ss_bin}"
-
-  log_info "步骤 3/3：生成配置并启动服务..."
-
+  local ss_bin="${bin_dir}/ssserver" config_path="${config_dir}/config.json"
+  local service_name="shadowsocks-server.service" unit_path="/etc/systemd/system/shadowsocks-server.service"
+  local meta_path="${config_dir}/install-meta.json" i
+  TX_USER="$user"; TX_CONFIG="$config_dir"
+  TX_FILES=("$ss_bin" "$config_path" "$unit_path" "$meta_path")
+  mkdir -p "${TX_DIR}/backup" "${TX_DIR}/stage"
+  for i in "${!TX_FILES[@]}"; do
+    [[ ! -L "${TX_FILES[$i]}" ]] || die "Refusing symlink target: ${TX_FILES[$i]}"
+    if [[ -e "${TX_FILES[$i]}" ]]; then
+      [[ -f "${TX_FILES[$i]}" ]] || die "Target is not a regular file"
+      TX_EXISTED[i]=1; cp -p -- "${TX_FILES[$i]}" "${TX_DIR}/backup/$i"
+    else TX_EXISTED[i]=0; fi
+  done
+  if [[ -e "$meta_path" ]]; then
+    [[ "$(stat -c %u "$meta_path")" == 0 && "$(stat -c %a "$meta_path")" == 600 ]] || die "Unsafe metadata ownership/permissions"
+    local metadata
+    metadata="$(read_install_metadata "$meta_path")"
+    jq -e --arg bin "$ss_bin" --arg dir "$config_dir" --arg user "$user" '
+      (.metaVersion == "1" or .metaVersion == "2") and .ssserverPath == $bin and .configDir == $dir and
+      .configPath == ($dir + "/config.json") and .runUser == $user and .serviceName == "shadowsocks-server.service" and
+      (.metaVersion == "1" or (.createdUser | type == "boolean"))' <<<"$metadata" >/dev/null || die "Metadata does not match installation"
+    TX_USER_OWNED="$(jq -r '.metaVersion == "2" and .createdUser == true' <<<"$metadata")"
+  fi
+  TX_RUNNING=0
+  if systemctl is-active --quiet "$service_name"; then TX_RUNNING=1; fi
+  TX_ENABLED="$(systemctl is-enabled "$service_name" 2>/dev/null || true)"
+  case "$TX_ENABLED" in masked|masked-runtime) die "Service is masked; unmask explicitly before installation" ;; esac
+  if [[ -d "$config_dir" ]]; then
+    [[ "$(stat -c %u "$config_dir")" == 0 ]] || die "Config directory must be root-owned"
+    [[ "$(( 8#$(stat -c %a "$config_dir") & 0022 ))" == 0 ]] || die "Config directory must not be group/world writable"
+    TX_CONFIG_EXISTED=1
+    TX_CONFIG_MODE="$(stat -c %a "$config_dir")"; TX_CONFIG_OWNER="$(stat -c %u:%g "$config_dir")"
+  fi
+  TX_ACTIVE=1
   ensure_user "$user"
-
-  mkdir -p "$config_dir"
-  chmod 750 "$config_dir"
-  chown root:"$user" "$config_dir"
-
-  local config_path="${config_dir%/}/config.json"
-  write_config "$config_path" "$port" "$password" "$method" "$mode" "$user"
-
-  if [[ ! -s "$config_path" ]]; then
-    die "配置文件写入失败或为空：${config_path}"
-  fi
-  if ! jq -e . "$config_path" >/dev/null 2>&1; then
-    log_warn "配置文件不是合法 JSON：${config_path}"
-    sed -n '1,120p' "$config_path" >&2 || true
-    exit 1
-  fi
-
-  if ! jq -e '(.server | type) == "string"' "$config_path" >/dev/null 2>&1; then
-    log_warn "配置字段 server 类型不正确（需要 string）：${config_path}"
-    sed -n '1,120p' "$config_path" >&2 || true
-    exit 1
-  fi
-
-  if ! jq -e '(.server_port | type) == "number"' "$config_path" >/dev/null 2>&1; then
-    log_warn "配置字段 server_port 类型不正确（需要 number）：${config_path}"
-    sed -n '1,120p' "$config_path" >&2 || true
-    exit 1
-  fi
-
-  # Use the actual config values as the source of truth.
-  port="$(jq -r '.server_port' "$config_path")"
-  method="$(jq -r '.method' "$config_path")"
-  mode="$(jq -r '.mode' "$config_path")"
-
-  log_ok "配置文件已写入：${config_path}"
-  log_info "最终配置：port=${port}, method=${method}, mode=${mode}"
-
-  local service_name="shadowsocks-server.service"
-  local unit_path="/etc/systemd/system/${service_name}"
-  write_systemd_unit "$unit_path" "$ss_bin" "$config_path" "$config_dir" "$user"
-
+  (( TX_CREATED_USER == 0 )) || TX_USER_OWNED=true
+  write_config "${TX_DIR}/stage/config.json" "$port" "$password" "$method" "$mode" "$user" "$existing_config"
+  write_systemd_unit "${TX_DIR}/stage/unit" "$ss_bin" "$config_path" "$config_dir" "$user"
+  chmod 644 "${TX_DIR}/stage/unit"
+  write_install_meta "${TX_DIR}/stage/meta" "$ss_bin" "$config_dir" "$config_path" "$user" "$service_name" "$version"
+  mkdir -p "$bin_dir" "$config_dir"
+  chmod 750 "$config_dir"; chown root:"$user" "$config_dir"
+  atomic_replace "${TX_DIR}/ssserver" "$ss_bin"
+  atomic_replace "${TX_DIR}/stage/config.json" "$config_path"
+  atomic_replace "${TX_DIR}/stage/unit" "$unit_path"
+  atomic_replace "${TX_DIR}/stage/meta" "$meta_path"
   systemctl daemon-reload
   systemctl enable "$service_name" >/dev/null
-  if systemctl is-active --quiet "$service_name"; then
-    systemctl restart "$service_name" >/dev/null
-  else
-    systemctl start "$service_name" >/dev/null
-  fi
-
-  if ! systemctl is-active --quiet "$service_name"; then
-    log_warn "服务启动失败：${service_name}"
-    systemctl status "$service_name" --no-pager -l >&2 || true
-    journalctl -u "$service_name" -n 200 --no-pager -l >&2 || true
-    log_warn "你也可以手动运行进行定位：${ss_bin} -c ${config_path} -vvv"
-    exit 1
-  fi
-
-  write_install_meta "${config_dir%/}/install-meta.json" "$ss_bin" "$config_dir" "$config_path" "$user" "$service_name" "$version"
-  log_ok "安装元数据已写入：${config_dir%/}/install-meta.json"
-
-  # Verify the port is actually listening (service may exit quickly after start).
-  local tries listen_result
-  tries=10
-  listen_result=1
-  while (( tries > 0 )); do
-    if ! systemctl is-active --quiet "$service_name"; then
-      listen_result=1
-      break
-    fi
-    if port_is_listening "$port" "$mode"; then
-      listen_result=0
-      log_ok "服务运行正常（已监听端口 ${port}）"
-      break
-    else
-      listen_result=$?
-      if [[ "$listen_result" == "2" ]]; then
-        break
-      fi
-    fi
-    sleep 0.3
-    tries=$((tries - 1))
-  done
-
-  if [[ "$listen_result" == "1" ]]; then
-    log_warn "服务看似已启动，但未监听端口：${port}"
-    systemctl status shadowsocks-server.service --no-pager -l >&2 || true
-    journalctl -u shadowsocks-server.service -n 200 --no-pager -l >&2 || true
-    dump_process_diagnostics
-    exit 1
-  fi
+  if (( TX_RUNNING )); then systemctl restart "$service_name"; else systemctl start "$service_name"; fi
+  wait_ready "$port" "$mode" || die "Service failed stable, MainPID-owned listening readiness"
+  TX_COMMITTED=1
 
   local hostname_short node_name public_ip ip_fallback uri_host
   hostname_short="$(hostname -s 2>/dev/null || hostname 2>/dev/null || echo "ss")"
@@ -630,7 +649,7 @@ main() {
   if command -v curl >/dev/null 2>&1; then
     local ip_source
     for ip_source in "https://api.ipify.org" "https://ifconfig.me/ip" "https://icanhazip.com" "https://ipinfo.io/ip"; do
-      public_ip="$(curl -fsSL --max-time 5 "$ip_source" 2>/dev/null || true)"
+      public_ip="$(curl -fsSL --connect-timeout 5 --max-time 5 "$ip_source" 2>/dev/null || true)"
       # 去除可能的空白/换行
       public_ip="$(echo "$public_ip" | tr -d '[:space:]')"
       [[ -n "$public_ip" && "$public_ip" =~ ^[0-9a-fA-F.:]+$ ]] && break
@@ -647,14 +666,14 @@ main() {
   uri_host="$(format_uri_host "$ip_fallback")"
 
   echo
-  echo "====================================== 配置信息 ======================================"
+  echo "Shadowsocks ${version} 已就绪"
   echo "节点名称: ${node_name}"
   echo "服务器地址: ${ip_fallback}"
   echo "端口: ${port}"
   echo "密码: ${password}"
   echo "加密方式: ${method}"
   echo "传输模式: ${mode}"
-  echo "====================================================================================="
+
 
   local ss_link=""
   if command -v base64 >/dev/null 2>&1; then
@@ -681,7 +700,7 @@ main() {
     firewall_proto="UDP"
   fi
   echo "Firewall/Security Group: allow ${firewall_proto} ${port}"
-  log_ok "=== 一键安装完成 ==="
+  log_ok "安装完成"
 }
 
 # BASH_SOURCE[0] is unset when bash reads the installer from stdin.

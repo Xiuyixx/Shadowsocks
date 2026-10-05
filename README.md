@@ -27,12 +27,6 @@
 curl -fsSL https://raw.githubusercontent.com/Xiuyixx/Shadowsocks/main/install.sh | sudo bash
 ```
 
-兼容写法：
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/Xiuyixx/Shadowsocks/main/install.sh | sudo bash
-```
-
 ### 自定义端口与密码安装
 
 推荐写法：
@@ -94,7 +88,7 @@ bash install.sh --help
 
 SS2022 常用示例（请确保你的客户端也支持对应 method）：
 
-未显式传入 `--password` 时，安装器会按所选 SS2022 方法自动生成正确长度的 base64 密钥；显式传入或从旧配置继承的密钥会在启动服务前校验。
+新安装或显式切换 method 且未传入 `--password` 时，安装器按所选方法生成新密钥；不改变 method 的升级保留原密码。SS2022 密钥会在启动服务前校验。
 
 - `2022-blake3-aes-128-gcm`（建议密码用 16 字节 key 的 base64）：
 
@@ -130,12 +124,14 @@ journalctl -u shadowsocks-server.service -e --no-pager
 
 ## 升级 / 重跑
 
-重复运行安装脚本是安全的：它会覆盖二进制、配置和 unit，然后重启服务。
+重复运行会先下载校验并暂存文件，备份现有二进制、配置、unit 和元数据，再逐文件原子替换并启动/重启服务。只有同一个 systemd MainPID 拥有所需 TCP/UDP 监听并连续通过 4 次（间隔 0.5 秒）探测才视为成功。
+
+普通错误及 INT/TERM/HUP 会触发 EXIT 回滚：还原旧文件、配置目录权限、服务启用/运行状态；失败诊断及回滚异常写入 stderr；回滚不完整时保留备份目录并打印路径，供手动恢复。文件替换是逐文件原子的，不是跨文件原子事务；SIGKILL、断电、磁盘损坏不在自动回滚保证内，包管理器依赖安装也不回滚。
 
 > 注意：当前仓库是**单节点 / 单实例**模型。重复执行安装脚本的语义是**升级或覆盖当前节点**，不是“新增第二个节点”。
 
 智能升级行为：
-- 如果系统里已经有 `/etc/shadowsocks/config.json`，且你没有显式传 `--port/--password/--method/--mode`（或对应环境变量），脚本会自动沿用已有配置值。
+- 保留已有合法 JSON 的全部其它字段（包括 server、plugin、自定义字段）；仅修改所选 port/password/method/mode，缺失项补默认值。非法 JSON 或不兼容的核心字段会报错，不会静默重置。
 - 这意味着你可以直接执行不带参数的安装命令来“只升级版本”，不会把 SS2022 配置重置成默认 `aes-128-gcm`。
 - 如果你之前使用过自定义 `--config-dir` / `--bin-dir` / `--user`，后续升级时建议继续传相同参数，以确保脚本定位到原安装位置。
 
@@ -156,12 +152,15 @@ curl -fsSL https://raw.githubusercontent.com/Xiuyixx/Shadowsocks/main/install.sh
 - `curl | bash` 天生有风险：你是在以 root 身份执行远程代码。更稳妥的做法是先下载 `install.sh` 审计后再运行。
 - 更安全/可复现的方式是用 `--version vX.Y.Z` 固定版本。
 - 安装器使用上游的 Linux musl 静态构建，不依赖目标系统的 glibc 版本。
-- 安装脚本会在上游 release 提供 `.sha256` 文件时进行**尽力而为的校验**；否则会警告并继续。
+- 默认严格 SHA256 校验：对应 `.sha256` 缺失、下载失败、格式错误或摘要不匹配均终止。支持纯 64 位十六进制摘要及标准文件名条目；只有显式 `--skip-sha256` 才跳过。摘要与二进制同源，不能替代独立签名认证。
+- API、资产及摘要请求均有连接/总时限和有限重试；API 不可用、元数据无效、空资产或缺少目标架构时回退至官方 Release 页面。
+- 不更改 BBR、TFO 或任何 sysctl 参数；保留已有配置中的 fast_open 值。
+- 路径先规范化并拒绝关键宽泛目录，固定服务名；元数据要求 root 拥有、0600、受支持 schema 且路径/用户关联匹配。
 - 建议用防火墙做 allowlist（只允许你的固定 IP 连接）。
 
 ## 卸载
 
-推荐直接使用本仓库的卸载脚本（会停止服务并清理 unit/配置/二进制/用户）：
+推荐直接使用本仓库的卸载脚本（停止服务并清理 unit/配置/二进制；仅删除元数据明确记录为本安装器创建的用户）：
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Xiuyixx/Shadowsocks/main/uninstall.sh | sudo bash
@@ -176,10 +175,13 @@ curl -fsSL https://raw.githubusercontent.com/Xiuyixx/Shadowsocks/main/uninstall.
 - `--user <name>`
 - `--service <name>`
 - `--keep-user`
+- `--yes`（无人值守确认）
 
 说明：
+- 默认从 `/dev/tty` 读取确认，支持 `curl | bash`；无终端必须显式 `--yes`，不会从脚本输入流读取确认。
+- 升级保留 `createdUser` 所有权；旧版/无元数据时保守保留用户，避免删除预先存在的账户。用户参数若与元数据不一致则拒绝卸载。
 - 如果存在 `install-meta.json`，卸载脚本会优先读取它来自动识别安装信息。
-- 如果你显式传了上面的参数，**显式参数优先**，会覆盖 metadata 中的值。
+- 如果你显式传了上面的参数，必须与经过验证的 metadata 一致，否则拒绝卸载。无 metadata 的旧安装必须能验证 unit 的 ExecStart/User 与配置结构；只删除安装器已知文件，保留目录中的其他文件。
 
 ## License
 
