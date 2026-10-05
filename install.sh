@@ -659,6 +659,7 @@ main() {
   log_ok "=== 一键安装完成 ==="
 }
 
-if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+# BASH_SOURCE[0] is unset when bash reads the installer from stdin.
+if [[ "${BASH_SOURCE[0]:-$0}" == "$0" ]]; then
   main "$@"
 fi
