@@ -29,6 +29,12 @@ if get_release_by_tag v1.25.0 >/dev/null 2>&1; then
 fi
 github_api() { printf '%s' '{"tag_name":"v1.25.0","assets":[]}'; }
 [[ "$(get_latest_version)" == 'v1.25.0' ]]
+# Empty API assets plus an empty release page must fail on every jq version.
+if get_release_by_tag v1.25.0 >/dev/null 2>&1; then
+  echo 'expected empty API and page assets to fail' >&2
+  exit 1
+fi
+github_api() { printf '%s' '{"tag_name":"v1.25.0","assets":[{"name":"test.x86_64-unknown-linux-musl.tar.xz","browser_download_url":"https://github.com/shadowsocks/shadowsocks-rust/releases/download/v1.25.0/test.x86_64-unknown-linux-musl.tar.xz"}]}'; }
 jq -e '.tag_name == "v1.25.0"' <<<"$(get_release_by_tag v1.25.0)" >/dev/null
 printf '%s\n' 'release API fallback tests passed'
 for api_response in 'not-json' '{"assets":[]}' '{"assets":[{"name":"other.aarch64-unknown-linux-musl.tar.xz"}]}'; do
