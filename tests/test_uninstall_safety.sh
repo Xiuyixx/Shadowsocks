@@ -5,10 +5,11 @@ work="$(mktemp -d)"
 trap 'rm -rf -- "$work"' EXIT
 # Redirect the unit destination so even an accidental successful test is isolated.
 sed -e "s|/run/shadowsocks-installer/operation.lock|$work/lock/operation.lock|g" -e "s|/etc/systemd/system/\${SERVICE_NAME}|$work/unit|g" "$repo/uninstall.sh" > "$work/uninstaller"
+mkdir -p "$work/config" "$work/bin"
 for args in '--config-dir /etc' '--config-dir /tmp/../usr' '--user root' '--user daemon' '--service ssh.service' '--bin-path /etc/passwd'; do
   # Intentional splitting: each fixture is a literal option/value pair.
   # shellcheck disable=SC2086
-  if bash "$work/uninstaller" $args </dev/null > "$work/output" 2>&1; then cat "$work/output"; exit 1; fi
+  if bash "$work/uninstaller" --config-dir "$work/config" --bin-path "$work/bin/ssserver" $args </dev/null > "$work/output" 2>&1; then cat "$work/output"; exit 1; fi
   grep -Eq 'Unsafe|Critical|Invalid' "$work/output"
 done
 mkdir -p "$work/config" "$work/bin" "$work/mocks"
