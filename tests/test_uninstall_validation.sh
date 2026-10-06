@@ -14,12 +14,13 @@ jq -n \
     serviceName: "--help"
   }' > "${tmp_dir}/install-meta.json"
 
+sed "s|/run/shadowsocks-installer/operation.lock|$tmp_dir/lock/operation.lock|g" "$repo_dir/uninstall.sh" > "$tmp_dir/uninstaller"
 run_uninstaller=(bash)
 if [[ ${EUID:-0} -ne 0 ]]; then
   run_uninstaller=(sudo bash)
 fi
 
-if output="$("${run_uninstaller[@]}" "${repo_dir}/uninstall.sh" --config-dir "$tmp_dir" </dev/null 2>&1)"; then
+if output="$("${run_uninstaller[@]}" "$tmp_dir/uninstaller" --config-dir "$tmp_dir" </dev/null 2>&1)"; then
   printf 'expected unsafe metadata to be rejected\n' >&2
   exit 1
 fi

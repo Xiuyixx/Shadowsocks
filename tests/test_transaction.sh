@@ -5,7 +5,7 @@ repo_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 work="$(mktemp -d)"
 trap 'rm -rf -- "$work"' EXIT
 # Only redirect the fixed unit destination; run the actual main, writers and rollback.
-sed "s|/etc/systemd/system/shadowsocks-server.service|$work/unit|g" "$repo_dir/install.sh" > "$work/installer"
+sed -e "s|/run/shadowsocks-installer/operation.lock|$work/lock/operation.lock|g" -e "s|/etc/systemd/system/shadowsocks-server.service|$work/unit|g" "$repo_dir/install.sh" > "$work/installer"
 mkdir "$work/archive"
 printf '#!/usr/bin/env bash\nprintf "test binary\\n"\n' > "$work/archive/ssserver"
 tar -cJf "$work/asset.tar.xz" -C "$work/archive" ssserver
@@ -38,7 +38,8 @@ for scenario in new upgrade ip_failure restart start write signal readiness meta
     source "$work/installer"
     install_deps() { :; }
     require_root() { :; }
-    id() { if [[ "$*" == '-u shadowsocks' ]]; then echo 987; else command id "$@"; fi; }
+    id() { case "$*" in "-u shadowsocks") echo 987 ;; "-g shadowsocks") echo 0 ;; *) command id "$@" ;; esac; }
+    pid_in_service_cgroup() { [[ "$1" == 123 && "$2" == /system.slice/shadowsocks-server.service ]]; }
     chown() { :; }
     install() { local args=(); while [[ $# -gt 0 ]]; do case "$1" in -o|-g) shift 2 ;; *) args+=("$1"); shift ;; esac; done; command install "${args[@]}"; }
     journalctl() { :; }
@@ -53,7 +54,7 @@ for scenario in new upgrade ip_failure restart start write signal readiness meta
       case "$1" in
         is-active) (( mock_running )) || return 1 ;;
         is-enabled) echo disabled; return 1 ;;
-        show) echo 123 ;;
+        show) if [[ "$*" == *ControlGroup* ]]; then echo /system.slice/shadowsocks-server.service; else echo 123; fi ;;
         stop) mock_running=0 ;;
         restart) [[ "$scenario" != restart ]] || return 1 ;;
         start) [[ "$scenario" != start ]] || return 1; mock_running=1 ;;
@@ -77,6 +78,7 @@ for scenario in new upgrade ip_failure restart start write signal readiness meta
   set -e
   if (( result == 0 )); then
     case "$scenario" in new|upgrade|ip_failure|v1|v1_noncanonical) ;; *) cat "$case_dir/output"; echo "expected $scenario failure"; exit 1 ;; esac
+    grep -q '^Group=0$' "$work/unit"
     jq -e '.metaVersion == "2" and .createdUser == false' "$case_dir/config/install-meta.json" >/dev/null
     if [[ "$scenario" == upgrade ]]; then jq -e '.server == "::" and .fast_open and .plugin == "keep" and .custom.x == [1,2] and .password == "old-key"' "$case_dir/config/config.json" >/dev/null; fi
   else

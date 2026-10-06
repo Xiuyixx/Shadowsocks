@@ -60,7 +60,8 @@ printf '%s\n' 'installer helper tests passed'
 assert_fails validate_install_inputs /usr/local/bin /etc/../etc root
 assert_fails validate_install_inputs /usr/local/bin /tmp/../usr shadowsocks
 assert_fails port_is_listening 8388 tcp_only 999
-systemctl() { case "$1" in is-active) return 0 ;; show) echo 123 ;; esac; }
+pid_in_service_cgroup() { [[ "$1" == 123 && "$2" == /test/service ]]; }
+systemctl() { case "$1" in is-active) return 0 ;; show) if [[ "$*" == *ControlGroup* ]]; then echo /test/service; else echo 123; fi ;; esac; }
 sleep() { :; }
 wait_ready 8388 tcp_and_udp
 systemctl() { case "$1" in is-active) return 0 ;; show) echo 999 ;; esac; }

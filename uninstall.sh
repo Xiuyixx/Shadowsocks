@@ -1,6 +1,29 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Shared fixed lock with install.sh; never configurable in production.
+SS_INSTALL_LOCK_PATH="/run/shadowsocks-installer/operation.lock"
+acquire_install_lock() {
+  command -v flock >/dev/null 2>&1 || die "Missing command: flock (util-linux)"
+  local lock_dir="${SS_INSTALL_LOCK_PATH%/*}" response
+  if [[ ! -e "$lock_dir" && ! -L "$lock_dir" ]]; then
+    mkdir -m 700 -- "$lock_dir" 2>/dev/null || [[ -d "$lock_dir" ]] || die "Cannot create lock directory"
+  fi
+  [[ -d "$lock_dir" && ! -L "$lock_dir" && "$(stat -c %u:%a "$lock_dir")" == 0:700 ]] || die "Unsafe lock directory"
+  [[ ! -L "$SS_INSTALL_LOCK_PATH" ]] || die "Unsafe lock file"
+  if [[ -e "$SS_INSTALL_LOCK_PATH" ]]; then
+    [[ -f "$SS_INSTALL_LOCK_PATH" && "$(stat -c %u:%a "$SS_INSTALL_LOCK_PATH")" == 0:600 ]] || die "Unsafe lock file"
+  fi
+  # Bash coprocess pipe descriptors are close-on-exec, unlike a normal exec 9>.
+  # flock owns the lock, --close keeps it out of its child; EOF releases it only
+  # when this shell exits (after rollback). No service/daemon inherits the lock.
+  coproc SS_LOCK { umask 077; flock -n -o "$SS_INSTALL_LOCK_PATH" sh -c 'echo locked; cat >/dev/null'; }
+  # Keep the write pipe open in the invoking shell until its EXIT cleanup.
+  [[ -n "${SS_LOCK[1]}" ]] || die "Cannot hold install lock"
+  IFS= read -r response <&"${SS_LOCK[0]}" || die "Another installer or uninstaller is already running"
+  [[ "$response" == locked ]] || die "Cannot acquire install lock"
+}
+
 usage() {
   cat <<'EOF'
 Uninstall Shadowsocks (shadowsocks-rust) installed by this repo.
@@ -140,6 +163,7 @@ done
 if [[ ${EUID:-0} -ne 0 ]]; then
   die "请以 root 运行：sudo bash $0"
 fi
+acquire_install_lock
 
 # Defaults are accepted only with verified ownership evidence.
 DEFAULT_CONFIG_DIR="/etc/shadowsocks"

@@ -124,7 +124,7 @@ journalctl -u shadowsocks-server.service -e --no-pager
 
 ## 升级 / 重跑
 
-重复运行会先下载校验并暂存文件，备份现有二进制、配置、unit 和元数据，再逐文件原子替换并启动/重启服务。只有同一个 systemd MainPID 拥有所需 TCP/UDP 监听并连续通过 4 次（间隔 0.5 秒）探测才视为成功。
+重复运行会先下载校验并暂存文件，备份现有二进制、配置、unit 和元数据，再逐文件原子替换并启动/重启服务。只有 systemd MainPID 保持稳定、属于该服务 cgroup，且所需 TCP/UDP 监听由 MainPID 或该服务精确 cgroup / 后代 cgroup 内的进程持有，并连续通过 4 次（间隔 0.5 秒）探测才视为成功。支持 systemd cgroup v1 / v2；无关进程、相似 PID 或 cgroup 名称不能代替服务就绪。
 
 普通错误及 INT/TERM/HUP 会触发 EXIT 回滚：还原旧文件、配置目录权限、服务启用/运行状态；失败诊断及回滚异常写入 stderr；回滚不完整时保留备份目录并打印路径，供手动恢复。文件替换是逐文件原子的，不是跨文件原子事务；SIGKILL、断电、磁盘损坏不在自动回滚保证内，包管理器依赖安装也不回滚。
 
@@ -132,6 +132,7 @@ journalctl -u shadowsocks-server.service -e --no-pager
 
 智能升级行为：
 - 保留已有合法 JSON 的全部其它字段（包括 server、plugin、自定义字段）；仅修改所选 port/password/method/mode，缺失项补默认值。非法 JSON 或不兼容的核心字段会报错，不会静默重置。
+- 保留 plugin 字段不代表通用插件支持：不负责安装/配置插件，插件仍须兼容上游版本、unit hardening 和传输模式。允许服务 cgroup 内的插件子进程持有所需监听；无插件的普通安装保持原有行为。
 - 这意味着你可以直接执行不带参数的安装命令来“只升级版本”，不会把 SS2022 配置重置成默认 `aes-128-gcm`。
 - 如果你之前使用过自定义 `--config-dir` / `--bin-dir` / `--user`，后续升级时建议继续传相同参数，以确保脚本定位到原安装位置。
 
@@ -156,6 +157,8 @@ curl -fsSL https://raw.githubusercontent.com/Xiuyixx/Shadowsocks/main/install.sh
 - API、资产及摘要请求均有连接/总时限和有限重试；API 不可用、元数据无效、空资产或缺少目标架构时回退至官方 Release 页面。
 - 不更改 BBR、TFO 或任何 sysctl 参数；保留已有配置中的 fast_open 值。
 - 路径先规范化并拒绝关键宽泛目录，固定服务名；元数据要求 root 拥有、0600、受支持 schema 且路径/用户关联匹配。
+- 安装/卸载共享固定 `/run/shadowsocks-installer/operation.lock` 非阻塞 flock；在读取安装状态、安装依赖之前获取，持有至退出/回滚结束。并发操作立即报错，不自动等待。锁目录要求 root:0700、锁文件 root:0600，拒绝符号链接，不接受环境变量改锁路径；锁不传给服务/后台进程。`flock`（util-linux）须已存在；不要删除正在使用的锁文件。
+- 端口仅接受十进制 1–65535，允许前导零，无整数溢出转换。服务使用账户实际主 GID（不假设存在同名组），配置及目录与 unit 使用同一 GID；保留用户创建/回滚所有权记录。
 - 建议用防火墙做 allowlist（只允许你的固定 IP 连接）。
 
 ## 卸载
@@ -182,6 +185,18 @@ curl -fsSL https://raw.githubusercontent.com/Xiuyixx/Shadowsocks/main/uninstall.
 - 升级保留 `createdUser` 所有权；旧版/无元数据时保守保留用户，避免删除预先存在的账户。用户参数若与元数据不一致则拒绝卸载。
 - 如果存在 `install-meta.json`，卸载脚本会优先读取它来自动识别安装信息。
 - 如果你显式传了上面的参数，必须与经过验证的 metadata 一致，否则拒绝卸载。无 metadata 的旧安装必须能验证 unit 的 ExecStart/User 与配置结构；只删除安装器已知文件，保留目录中的其他文件。
+
+## 开发与验证
+
+CI 固定 `ubuntu-24.04`，执行 Bash 语法、ShellCheck 及 `tests/test_*.sh`。这些回归测试使用隔离路径、mock service/user 命令，**不是真实 systemd 集成测试**；包含真正同时运行的安装/卸载进程锁测试、端口边界、不同主组、v1/v2 cgroup 和事务回滚。
+
+另提供 `tests/integration_systemd_vm.sh`：仅供**全新、独占、可销毁 VM**，root + systemd PID 1，且必须显式确认。禁止在本机、生产服务器、共享 CI runner 或特权容器中运行；普通 CI 不执行。检查条件只能防误操作，不能证明 VM 没有重要数据，请人工确认隔离（不要挂载宿主系统目录）。先在该 VM 安装 `python3 jq iproute2 util-linux shellcheck curl openssl xz-utils`，再运行：
+
+```bash
+sudo env SS_DISPOSABLE_VM_ACK=I_ACCEPT_DISPOSABLE_VM_DESTRUCTION bash tests/integration_systemd_vm.sh
+```
+
+该 harness 会真实创建测试账户/组及固定服务，测试 differently-named 主组配置访问、子进程监听、hardening、失败升级回滚及卸载，退出时清理。使用本地 Python listener fixture，不下载上游，不验证 Shadowsocks 协议或任意插件。没有隔离 VM 时只提交 harness，不声称已实测真实 systemd。
 
 ## License
 

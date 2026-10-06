@@ -4,7 +4,7 @@ repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 work="$(mktemp -d)"
 trap 'rm -rf -- "$work"' EXIT
 # Redirect the unit destination so even an accidental successful test is isolated.
-sed "s|/etc/systemd/system/\${SERVICE_NAME}|$work/unit|g" "$repo/uninstall.sh" > "$work/uninstaller"
+sed -e "s|/run/shadowsocks-installer/operation.lock|$work/lock/operation.lock|g" -e "s|/etc/systemd/system/\${SERVICE_NAME}|$work/unit|g" "$repo/uninstall.sh" > "$work/uninstaller"
 for args in '--config-dir /etc' '--config-dir /tmp/../usr' '--user root' '--user daemon' '--service ssh.service' '--bin-path /etc/passwd'; do
   # Intentional splitting: each fixture is a literal option/value pair.
   # shellcheck disable=SC2086

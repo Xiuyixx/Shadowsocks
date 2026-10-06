@@ -3,6 +3,8 @@ set -euo pipefail
 
 SCRIPT_VERSION="2026-10-05"
 INSTALL_META_VERSION="2"
+# Deliberately fixed: do not make the production lock path user-configurable.
+SS_INSTALL_LOCK_PATH="/run/shadowsocks-installer/operation.lock"
 
 usage() {
   cat <<'EOF'
@@ -58,6 +60,27 @@ require_root() {
   if [[ ${EUID:-0} -ne 0 ]]; then
     die "Run as root (use: sudo bash -s -- ...)"
   fi
+}
+
+acquire_install_lock() {
+  command -v flock >/dev/null 2>&1 || die "Missing command: flock (util-linux)"
+  local lock_dir="${SS_INSTALL_LOCK_PATH%/*}" response
+  if [[ ! -e "$lock_dir" && ! -L "$lock_dir" ]]; then
+    mkdir -m 700 -- "$lock_dir" 2>/dev/null || [[ -d "$lock_dir" ]] || die "Cannot create lock directory"
+  fi
+  [[ -d "$lock_dir" && ! -L "$lock_dir" && "$(stat -c %u:%a "$lock_dir")" == 0:700 ]] || die "Unsafe lock directory"
+  [[ ! -L "$SS_INSTALL_LOCK_PATH" ]] || die "Unsafe lock file"
+  if [[ -e "$SS_INSTALL_LOCK_PATH" ]]; then
+    [[ -f "$SS_INSTALL_LOCK_PATH" && "$(stat -c %u:%a "$SS_INSTALL_LOCK_PATH")" == 0:600 ]] || die "Unsafe lock file"
+  fi
+  # Bash coprocess pipe descriptors are close-on-exec, unlike a normal exec 9>.
+  # flock owns the lock, --close keeps it out of its child; EOF releases it only
+  # when this shell exits (after rollback). No service/daemon inherits the lock.
+  coproc SS_LOCK { umask 077; flock -n -o "$SS_INSTALL_LOCK_PATH" sh -c 'echo locked; cat >/dev/null'; }
+  # Keep the write pipe open in the invoking shell until its EXIT cleanup.
+  [[ -n "${SS_LOCK[1]}" ]] || die "Cannot hold install lock"
+  IFS= read -r response <&"${SS_LOCK[0]}" || die "Another installer or uninstaller is already running"
+  [[ "$response" == locked ]] || die "Cannot acquire install lock"
 }
 
 normalize_path() {
@@ -241,16 +264,29 @@ validate_password_for_method() {
     die "Password for ${method} must decode to ${expected_bytes} bytes (got ${decoded_bytes})"
 }
 
+normalize_port() {
+  local port="$1"
+  [[ "$port" =~ ^[0-9]+$ ]] || die "Invalid port: $port"
+  port="${port#"${port%%[!0]*}"}"
+  [[ -n "$port" && ${#port} -le 5 ]] || die "Port out of range: $1"
+  (( port <= 65535 )) || die "Port out of range: $1"
+  printf '%s\n' "$port"
+}
+
 ensure_user() {
   local user="$1"
   if ! id -u "$user" >/dev/null 2>&1; then
     useradd --system --no-create-home --shell /usr/sbin/nologin "$user"
     TX_CREATED_USER=1
   fi
+  TX_USER_GID="$(id -g "$user")" || die "Cannot resolve primary GID for $user"
+  [[ "$TX_USER_GID" =~ ^[0-9]+$ ]] || die "Invalid primary GID for $user"
+  TX_USER_GROUP="$(getent group "$TX_USER_GID" | awk -F: 'NR == 1 {print $1}')"
+  [[ -n "$TX_USER_GROUP" ]] || die "Cannot resolve primary group for $user"
 }
 
 write_config() {
-  local config_path="$1" port="$2" password="$3" method="$4" mode="$5" user="$6"
+  local config_path="$1" port="$2" password="$3" method="$4" mode="$5" group="$6"
 
   need_cmd jq
 
@@ -272,12 +308,12 @@ write_config() {
     '.server_port=$port | .password=$password | .method=$method | .mode=$mode' "$source_config" > "$tmp_config"
   [[ "$source_config" != "${tmp_config}.base" ]] || rm -f -- "$source_config"
 
-  install -m 0640 -o root -g "$user" "$tmp_config" "$config_path"
+  install -m 0640 -o root -g "$group" "$tmp_config" "$config_path"
   rm -f "$tmp_config"
 }
 
 write_systemd_unit() {
-  local unit_path="$1" ss_bin="$2" config_path="$3" config_dir="$4" user="$5"
+  local unit_path="$1" ss_bin="$2" config_path="$3" config_dir="$4" user="$5" gid="$6"
 
   cat > "$unit_path" <<EOF
 [Unit]
@@ -288,7 +324,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 User=${user}
-Group=${user}
+Group=${gid}
 Environment=RUST_LOG=info
 ExecStart=${ss_bin} -c ${config_path}
 Restart=on-failure
@@ -357,6 +393,7 @@ write_install_meta() {
 # All transaction state is global: EXIT traps must not depend on expired main locals.
 TX_DIR=""; TX_ACTIVE=0; TX_COMMITTED=0; TX_CREATED_USER=0; TX_USER_OWNED=false
 TX_FILES=(); TX_EXISTED=(); TX_RUNNING=0; TX_ENABLED=disabled; TX_USER=""; TX_CONFIG=""; TX_CONFIG_EXISTED=0
+TX_USER_GID=""; TX_USER_GROUP=""
 
 atomic_replace() {
   local source="$1" target="$2" temp
@@ -403,22 +440,37 @@ transaction_exit() {
 TX_TEMPS=()
 
 port_is_listening() {
-  local port="$1" mode="$2" pid="${3:-}" protocol output
+  local port="$1" mode="$2" pid="${3:-}" cgroup="${4:-}" protocol output candidate found
   [[ "$pid" =~ ^[1-9][0-9]*$ ]] || return 1
   for protocol in tcp udp; do
     [[ "$mode" == tcp_only && "$protocol" == udp ]] && continue
     [[ "$mode" == udp_only && "$protocol" == tcp ]] && continue
     if [[ "$protocol" == tcp ]]; then output="$(ss -H -ltnp 2>/dev/null)"; else output="$(ss -H -lunp 2>/dev/null)"; fi
-    awk -v port="$port" -v pid="$pid" '$4 ~ (":" port "$") && index($0, "pid=" pid ",") {found=1} END {exit !found}' <<<"$output" || return 1
+    found=0
+    while IFS= read -r candidate; do
+      if [[ "$candidate" == "$pid" ]] || { [[ -n "$cgroup" ]] && pid_in_service_cgroup "$candidate" "$cgroup"; }; then found=1; break; fi
+    done < <(awk -v port="$port" '$4 ~ (":" port "$") {print}' <<<"$output" | grep -oE 'pid=[0-9]+,' | sed -E 's/pid=([0-9]+),/\1/' || true)
+    (( found )) || return 1
   done
 }
 
+pid_in_service_cgroup() {
+  local pid="$1" expected="$2" hierarchy controllers path
+  [[ "$pid" =~ ^[1-9][0-9]*$ && "$expected" == /* && -r "/proc/$pid/cgroup" ]] || return 1
+  while IFS=: read -r hierarchy controllers path; do
+    [[ "$hierarchy:$controllers" == "0:" || ",$controllers," == *,name=systemd,* ]] || continue
+    [[ "$path" == "$expected" || "$path" == "$expected"/* ]] && return 0
+  done < "/proc/$pid/cgroup"
+  return 1
+}
+
 wait_ready() {
-  local port="$1" mode="$2" pid previous="" stable=0 tries
+  local port="$1" mode="$2" pid previous="" stable=0 tries cgroup
   for (( tries=0; tries<30; tries++ )); do
     systemctl is-active --quiet shadowsocks-server.service || return 1
     pid="$(systemctl show -p MainPID --value shadowsocks-server.service)"
-    if port_is_listening "$port" "$mode" "$pid"; then
+    cgroup="$(systemctl show -p ControlGroup --value shadowsocks-server.service 2>/dev/null || true)"
+    if port_is_listening "$port" "$mode" "$pid" "$cgroup" && pid_in_service_cgroup "$pid" "$cgroup"; then
       if [[ "$pid" == "$previous" ]]; then stable=$((stable+1)); else stable=1; fi
       (( stable >= 4 )) && return 0
     else stable=0; fi
@@ -488,6 +540,7 @@ main() {
   log_info "=== 进入一键安装模式 ==="
   log_info "Installer version: ${SCRIPT_VERSION}"
   require_root
+  acquire_install_lock
   need_cmd uname
 
   [[ ! -L "$bin_dir" && ! -L "$config_dir" ]] || die "Symlink install directory refused"
@@ -528,9 +581,7 @@ main() {
   : "${method:=aes-128-gcm}"
   : "${mode:=tcp_and_udp}"
 
-  [[ "$port" =~ ^[0-9]+$ ]] || die "Invalid port: $port"
-  port=$((10#$port))
-  (( port >= 1 && port <= 65535 )) || die "Port out of range: $port"
+  port="$(normalize_port "$port")"
 
   if [[ "$explicit_method" == 1 && "$explicit_password" == 0 && -f "$existing_config" && "$method" != "$(jq -r ' .method // empty' "$existing_config")" ]]; then
     password=""
@@ -624,12 +675,12 @@ main() {
   TX_ACTIVE=1
   ensure_user "$user"
   (( TX_CREATED_USER == 0 )) || TX_USER_OWNED=true
-  write_config "${TX_DIR}/stage/config.json" "$port" "$password" "$method" "$mode" "$user" "$existing_config"
-  write_systemd_unit "${TX_DIR}/stage/unit" "$ss_bin" "$config_path" "$config_dir" "$user"
+  write_config "${TX_DIR}/stage/config.json" "$port" "$password" "$method" "$mode" "$TX_USER_GID" "$existing_config"
+  write_systemd_unit "${TX_DIR}/stage/unit" "$ss_bin" "$config_path" "$config_dir" "$user" "$TX_USER_GID"
   chmod 644 "${TX_DIR}/stage/unit"
   write_install_meta "${TX_DIR}/stage/meta" "$ss_bin" "$config_dir" "$config_path" "$user" "$service_name" "$version"
   mkdir -p "$bin_dir" "$config_dir"
-  chmod 750 "$config_dir"; chown root:"$user" "$config_dir"
+  chmod 750 "$config_dir"; chown root:"$TX_USER_GID" "$config_dir"
   atomic_replace "${TX_DIR}/ssserver" "$ss_bin"
   atomic_replace "${TX_DIR}/stage/config.json" "$config_path"
   atomic_replace "${TX_DIR}/stage/unit" "$unit_path"
@@ -637,7 +688,7 @@ main() {
   systemctl daemon-reload
   systemctl enable "$service_name" >/dev/null
   if (( TX_RUNNING )); then systemctl restart "$service_name"; else systemctl start "$service_name"; fi
-  wait_ready "$port" "$mode" || die "Service failed stable, MainPID-owned listening readiness"
+  wait_ready "$port" "$mode" || die "Service failed stable, service-cgroup listening readiness"
   TX_COMMITTED=1
 
   local hostname_short node_name public_ip ip_fallback uri_host
