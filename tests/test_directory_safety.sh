@@ -10,7 +10,8 @@ mkdir -p "$work/bin" "$work/config" "$work/parent/child"
 # Root-owned sticky /tmp is permitted as an ancestor, not an install target.
 validate_install_inputs "$work/bin" "$work/config" ss-directory-test
 validate_directory_chain "$work/new/child"
-validate_directory_chain /usr/local/bin
+# Do not assume hosted runner /usr/local/bin has safe ownership/modes.
+validate_directory_chain "$work/bin"
 chmod 777 "$work/bin"
 assert_fails validate_install_inputs "$work/bin" "$work/config" ss-directory-test
 [[ "$(stat -c %a "$work/bin")" == 777 ]]
