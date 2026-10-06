@@ -16,14 +16,15 @@ assert_fails() {
 [[ "$(format_uri_host '2001:db8::1')" == "[2001:db8::1]" ]]
 [[ "$(format_uri_host '[2001:db8::1]')" == "[2001:db8::1]" ]]
 
-validate_install_inputs "/usr/local/bin" "/etc/shadowsocks" "shadowsocks"
+fixture_dir="$(mktemp -d)"
+trap 'rm -rf -- "$fixture_dir"' EXIT
+validate_install_inputs "$fixture_dir/bin" "$fixture_dir/config" "shadowsocks"
 assert_fails validate_install_inputs "/" "/etc/shadowsocks" "shadowsocks"
 assert_fails validate_install_inputs "/usr/local/bin" "/" "shadowsocks"
 assert_fails validate_install_inputs "/usr/local/bad path" "/etc/shadowsocks" "shadowsocks"
 assert_fails validate_install_inputs "/usr/local/bin" "/etc/shadowsocks" $'bad\nUser=root'
 
-fake_binary="$(mktemp)"
-trap 'rm -f "$fake_binary"' EXIT
+fake_binary="$fixture_dir/fake-binary"
 printf '#!/usr/bin/env bash\nexit 1\n' > "$fake_binary"
 chmod +x "$fake_binary"
 assert_fails validate_extracted_binary "$fake_binary"
