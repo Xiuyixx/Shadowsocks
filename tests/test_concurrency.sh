@@ -11,7 +11,8 @@ sed "s|/run/shadowsocks-installer/operation.lock|$work/lock/operation.lock|g" "$
 (
   source "$work/installer"
   install_deps() { touch "$work/entered"; while [[ ! -e "$work/release" ]]; do sleep 0.02; done; exit 17; }
-  main
+  # Hosted runners may have user-writable /usr/local/bin; isolate path checks too.
+  main --bin-dir "$work/bin" --config-dir "$work/config"
 ) > "$work/holder-output" 2>&1 &
 holder=$!
 for ((i=0; i<200; i++)); do [[ ! -e "$work/entered" ]] || break; sleep 0.02; done
