@@ -92,11 +92,36 @@ safe_directory() {
   case "$1" in /dev/*|/proc/*|/sys/*|/boot/*) return 1 ;; esac
 }
 
+# Check existing components, including ancestors of directories not created yet.
+# A root-owned sticky ancestor (e.g. /tmp) cannot replace root-owned children.
+validate_directory_chain() {
+  local path="$1" target="$1" owner mode
+  while :; do
+    [[ ! -L "$path" ]] || die "Symlink directory component refused: $path"
+    if [[ -e "$path" ]]; then
+      [[ -d "$path" ]] || die "Not a directory: $path"
+      owner="$(stat -c %u "$path")" || return 1
+      mode="$(stat -c %a "$path")" || return 1
+      [[ "$owner" == 0 ]] || die "Directory must be root-owned: $path"
+      if (( (8#$mode & 0022) != 0 )); then
+        if [[ "$path" == "$target" || $((8#$mode & 01000)) == 0 ]]; then
+          die "Directory must not be group/world writable: $path"
+        fi
+      fi
+    fi
+    [[ "$path" != / ]] || break
+    path="${path%/*}"; [[ -n "$path" ]] || path=/
+  done
+}
+
+
 validate_install_inputs() {
   local bin_dir config_dir user="$3"
   bin_dir="$(normalize_path "$1")" || return 1
   config_dir="$(normalize_path "$2")" || return 1
   if ! safe_directory "$bin_dir" || ! safe_directory "$config_dir"; then die "Unsafe install directory"; fi
+  validate_directory_chain "$1" || return 1
+  validate_directory_chain "$2" || return 1
   [[ "$user" =~ ^[a-z_][a-z0-9_-]*[$]?$ ]] || die "Invalid --user: $user"
   case "$user" in root|daemon|nobody|bin|sys|sync|www-data|sshd|systemd-*) die "Critical service user: $user" ;; esac
   if id -u "$user" >/dev/null 2>&1; then
@@ -106,6 +131,8 @@ validate_install_inputs() {
 
 validate_uninstall_inputs() {
   [[ ! -L "$BIN_PATH" && ! -L "$CONFIG_DIR" ]] || die "Refusing symlink uninstall targets"
+  validate_directory_chain "${BIN_PATH%/*}" || return 1
+  validate_directory_chain "$CONFIG_DIR" || return 1
   BIN_PATH="$(normalize_path "$BIN_PATH")"
   CONFIG_DIR="$(normalize_path "$CONFIG_DIR")"
   [[ "${BIN_PATH##*/}" == ssserver ]] || die "Invalid binary basename (expected ssserver)"
@@ -176,6 +203,7 @@ if [[ -z "$meta_config_dir" ]]; then
   meta_config_dir="$DEFAULT_CONFIG_DIR"
 fi
 [[ ! -L "$meta_config_dir" ]] || die "Refusing symlink config directory"
+validate_directory_chain "$meta_config_dir" || exit 1
 meta_config_dir="$(normalize_path "$meta_config_dir")"
 safe_directory "$meta_config_dir" || die "Unsafe config directory"
 META_PATH="${meta_config_dir%/}/install-meta.json"
@@ -243,39 +271,117 @@ if [[ "$YES" != 1 ]]; then
   if [[ ! "$_confirm" =~ ^[Yy]$ ]]; then log_info "已取消卸载。"; exit 0; fi
 fi
 
-if command -v systemctl >/dev/null 2>&1; then
-  log_info "停止并禁用服务：${SERVICE_NAME}"
-  systemctl disable --now "$SERVICE_NAME" >/dev/null
-  systemctl stop "$SERVICE_NAME" >/dev/null
-
-  if [[ -f "$UNIT_PATH" ]]; then
-    log_info "移除 systemd unit：${UNIT_PATH}"
-    rm -f "$UNIT_PATH"
-    systemctl daemon-reload >/dev/null 2>&1 || true
-  fi
+command -v systemctl >/dev/null 2>&1 || die "systemctl required; refusing to delete a potentially running installation"
+# Each backup lives beside its target, so staging/restoration uses same-filesystem
+# renames. Keep backups until all reversible steps and userdel have succeeded.
+declare -a targets=() stages=() staged=()
+service_touched=0
+user_delete_attempted=0
+committed=0
+was_active=0
+if systemctl is-active --quiet "$SERVICE_NAME"; then
+  was_active=1
 else
-  die "systemctl required; refusing to delete a potentially running installation"
+  status=$?
+  [[ "$status" == 3 || "$status" == 4 ]] || die "Cannot query service active state"
 fi
+was_enabled="$(systemctl is-enabled "$SERVICE_NAME" 2>/dev/null)" || true
+case "$was_enabled" in
+  enabled|enabled-runtime|disabled|static|indirect|not-found) ;;
+  *) die "Cannot safely restore service enable state: $was_enabled" ;;
+esac
 
-if [[ -d "$CONFIG_DIR" ]]; then
-  log_info "移除安装器配置文件：${CONFIG_DIR}"
-  rm -f -- "$CONFIG_DIR/config.json" "$META_PATH"
-  rmdir -- "$CONFIG_DIR" 2>/dev/null || log_info "保留非空配置目录：${CONFIG_DIR}"
-fi
+rollback_uninstall() {
+  local failed=0 i
+  log_warn "卸载失败；尝试恢复文件和服务状态"
+  for ((i=${#targets[@]}-1; i>=0; i--)); do
+    if [[ -e "${stages[i]}/original" ]]; then
+      if [[ -e "${targets[i]}" || -L "${targets[i]}" ]] || ! mv -T -- "${stages[i]}/original" "${targets[i]}"; then
+        log_warn "恢复失败：${targets[i]}；备份保留：${stages[i]}"
+        failed=1
+        continue
+      fi
+    elif [[ "${staged[i]}" == 1 || ! -f "${targets[i]}" || -L "${targets[i]}" ]]; then
+      log_warn "恢复失败：${targets[i]}；必要备份丢失：${stages[i]}/original"
+      failed=1
+    fi
+    rmdir -- "${stages[i]}" || { log_warn "备份目录清理失败：${stages[i]}"; failed=1; }
+  done
+  if [[ "$user_delete_attempted" == 1 ]] && ! id -u "$SS_USER" >/dev/null 2>&1; then
+    log_warn "账号已不存在，删除不可逆；无法自动恢复账户和运行状态"
+    failed=1
+  fi
+  if [[ "$service_touched" == 1 ]]; then
+    systemctl daemon-reload || { log_warn "恢复时 daemon-reload 失败"; failed=1; }
+    case "$was_enabled" in
+      enabled) systemctl enable "$SERVICE_NAME" || { log_warn "恢复服务启用状态失败"; failed=1; } ;;
+      enabled-runtime) systemctl enable --runtime "$SERVICE_NAME" || { log_warn "恢复服务启用状态失败"; failed=1; } ;;
+      disabled) systemctl disable "$SERVICE_NAME" || { log_warn "恢复服务禁用状态失败"; failed=1; } ;;
+    esac
+    if [[ "$was_active" == 1 && "$failed" == 0 ]]; then
+      systemctl start "$SERVICE_NAME" || { log_warn "恢复服务运行状态失败"; failed=1; }
+    elif [[ "$was_active" == 0 ]]; then
+      systemctl stop "$SERVICE_NAME" || { log_warn "恢复服务停止状态失败"; failed=1; }
+    fi
+  fi
+  if [[ "$failed" == 1 ]]; then
+    log_warn "回滚不完整，可能处于半卸载状态；请根据上述备份路径和错误手动恢复"
+  else
+    log_info "已恢复卸载前的文件和服务状态"
+  fi
+}
+uninstall_exit() {
+  local status=$?
+  trap - EXIT INT TERM HUP
+  if [[ "$committed" == 0 ]]; then
+    rollback_uninstall
+    [[ "$status" != 0 ]] || status=1
+  fi
+  exit "$status"
+}
+trap uninstall_exit EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap 'exit 129' HUP
 
-if [[ -f "$BIN_PATH" ]]; then
-  log_info "移除二进制：${BIN_PATH}"
-  rm -f "$BIN_PATH"
-fi
+for target in "$UNIT_PATH" "$CONFIG_DIR/config.json" "$META_PATH" "$BIN_PATH"; do
+  [[ -e "$target" ]] || continue
+  [[ -f "$target" && ! -L "$target" ]] || die "Unsafe uninstall file: $target"
+  stage="$(mktemp -d "${target%/*}/.ss-uninstall.XXXXXX")" || die "Cannot stage uninstall target: $target"
+  targets+=("$target"); stages+=("$stage"); staged+=(0)
+  [[ "$(stat -c %d -- "$target")" == "$(stat -c %d -- "$stage")" ]] || die "Uninstall staging must use the same filesystem: $target"
+done
+service_touched=1
+log_info "停止并禁用服务：${SERVICE_NAME}"
+systemctl stop "$SERVICE_NAME" || die "Failed to stop service"
+systemctl disable --now "$SERVICE_NAME" || die "Failed to disable service"
+for i in "${!targets[@]}"; do
+  mv -T -- "${targets[i]}" "${stages[i]}/original" || die "Failed to stage uninstall target: ${targets[i]}"
+  staged[i]=1
+done
+systemctl daemon-reload || die "Failed to reload systemd after uninstall"
 
 if [[ "$KEEP_USER" == "0" && "$CREATED_USER" == true ]]; then
   if id -u "$SS_USER" >/dev/null 2>&1; then
     log_info "移除系统用户：${SS_USER}"
-    userdel "$SS_USER" >/dev/null 2>&1 || true
+    user_delete_attempted=1
+    userdel "$SS_USER" || die "Failed to delete service user; attempting rollback"
   fi
 else
-  log_info "按参数要求保留用户：${SS_USER}"
+  log_info "保留用户：${SS_USER}"
 fi
-
+# Account deletion cannot be undone; never roll files back after this boundary.
+committed=1
+cleanup_failed=0
+for stage in "${stages[@]}"; do
+  if ! rm -f -- "$stage/original" || ! rmdir -- "$stage"; then
+    log_warn "卸载已提交，但备份清理失败（可能含敏感配置）：$stage"
+    cleanup_failed=1
+  fi
+done
+[[ "$cleanup_failed" == 0 ]] || die "Uninstall backup cleanup incomplete"
+if [[ -d "$CONFIG_DIR" ]]; then
+  rmdir -- "$CONFIG_DIR" 2>/dev/null || log_info "保留非空或无法移除的配置目录：${CONFIG_DIR}"
+fi
 log_ok "卸载完成"
 log_warn "提示：如果你之前手动放行过端口（云安全组/防火墙），需要你自行回收规则。"

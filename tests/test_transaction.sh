@@ -38,7 +38,7 @@ for scenario in new upgrade ip_failure restart start write signal readiness meta
     source "$work/installer"
     install_deps() { :; }
     require_root() { :; }
-    id() { case "$*" in "-u shadowsocks") echo 987 ;; "-g shadowsocks") echo 0 ;; *) command id "$@" ;; esac; }
+    id() { case "$*" in "-u shadowsocks") echo 987 ;; "-g shadowsocks"|"-G shadowsocks") echo 0 ;; *) command id "$@" ;; esac; }
     pid_in_service_cgroup() { [[ "$1" == 123 && "$2" == /system.slice/shadowsocks-server.service ]]; }
     chown() { :; }
     install() { local args=(); while [[ $# -gt 0 ]]; do case "$1" in -o|-g) shift 2 ;; *) args+=("$1"); shift ;; esac; done; command install "${args[@]}"; }

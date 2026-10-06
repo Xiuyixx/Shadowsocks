@@ -117,6 +117,38 @@ safe_directory() {
   case "$1" in /dev/*|/proc/*|/sys/*|/boot/*) return 1 ;; esac
 }
 
+# Check existing components, including ancestors of directories not created yet.
+# A root-owned sticky ancestor (e.g. /tmp) cannot replace root-owned children.
+validate_directory_chain() {
+  local path="$1" target="$1" owner mode
+  while :; do
+    [[ ! -L "$path" ]] || die "Symlink directory component refused: $path"
+    if [[ -e "$path" ]]; then
+      [[ -d "$path" ]] || die "Not a directory: $path"
+      owner="$(stat -c %u "$path")" || return 1
+      mode="$(stat -c %a "$path")" || return 1
+      [[ "$owner" == 0 ]] || die "Directory must be root-owned: $path"
+      if (( (8#$mode & 0022) != 0 )); then
+        if [[ "$path" == "$target" || $((8#$mode & 01000)) == 0 ]]; then
+          die "Directory must not be group/world writable: $path"
+        fi
+      fi
+    fi
+    [[ "$path" != / ]] || break
+    path="${path%/*}"; [[ -n "$path" ]] || path=/
+  done
+}
+
+validate_user_groups() {
+  local user="$1" primary groups gid
+  primary="$(id -g "$user")" || die "Cannot resolve primary GID for $user"
+  groups="$(id -G "$user")" || die "Cannot resolve group membership for $user"
+  [[ "$primary" =~ ^[0-9]+$ && -n "$groups" ]] || die "Invalid group membership for $user"
+  for gid in $groups; do
+    [[ "$gid" == "$primary" ]] || die "User $user has supplementary groups; choose a dedicated service user with only its primary group"
+  done
+}
+
 validate_install_inputs() {
   local bin_dir config_dir user="$3"
   [[ ! -L "$1" && ! -L "$2" ]] || die "Symlink install directory refused"
@@ -124,10 +156,13 @@ validate_install_inputs() {
   config_dir="$(normalize_path "$2")" || return 1
   if ! safe_directory "$bin_dir" || ! safe_directory "$config_dir"; then die "Unsafe install directory"; fi
   [[ "$bin_dir" != "$config_dir" && "$config_dir" != "$bin_dir/"* && "$bin_dir" != "$config_dir/"* ]] || die "Overlapping installation directories"
+  validate_directory_chain "$1" || return 1
+  validate_directory_chain "$2" || return 1
   [[ "$user" =~ ^[a-z_][a-z0-9_-]*[$]?$ ]] || die "Invalid --user: $user"
   case "$user" in root|daemon|nobody|bin|sys|sync|www-data|sshd|systemd-*) die "Critical service user: $user" ;; esac
   if id -u "$user" >/dev/null 2>&1; then
     [[ "$(id -u "$user")" != 0 ]] || die "Cannot run as UID 0"
+    validate_user_groups "$user" || return 1
   fi
 }
 
@@ -170,7 +205,7 @@ github_api() {
 
 get_latest_version() {
   local tag release_url
-  if tag="$(github_api "https://api.github.com/repos/shadowsocks/shadowsocks-rust/releases/latest" | jq -er '.tag_name | select(type == "string" and length > 0)')"; then
+  if tag="$(github_api "https://api.github.com/repos/shadowsocks/shadowsocks-rust/releases/latest" | jq -ser 'select(length == 1) | .[0] | select(type == "object") | .tag_name | select(type == "string" and length > 0)')"; then
     printf '%s\n' "$tag"
     return 0
   fi
@@ -187,8 +222,7 @@ get_latest_version() {
 get_release_by_tag() {
   local tag="$1" arch="${2:-}" release_json assets_html
   [[ "$tag" =~ ^[A-Za-z0-9._-]+$ ]] || return 1
-  if release_json="$(github_api "https://api.github.com/repos/shadowsocks/shadowsocks-rust/releases/tags/${tag}" | jq -e --arg arch "$arch" --arg tag "$tag" 'select(.assets | type == "array" and length > 0) | select(all(.assets[]; (.name | type == "string") and (.browser_download_url | type == "string") and .browser_download_url == ("https://github.com/shadowsocks/shadowsocks-rust/releases/download/" + $tag + "/" + .name))) | select($arch == "" or any(.assets[]; (.name // "") | endswith("." + $arch + ".tar.xz")))')"; then
-    release_json="$(jq --arg tag "$tag" '.tag_name=$tag' <<<"$release_json")"
+  if release_json="$(github_api "https://api.github.com/repos/shadowsocks/shadowsocks-rust/releases/tags/${tag}" | jq -se --arg arch "$arch" --arg tag "$tag" 'select(length == 1) | .[0] | select(type == "object") | select(.assets | type == "array" and length > 0) | select(all(.assets[]; (.name | type == "string") and (.browser_download_url | type == "string") and .browser_download_url == ("https://github.com/shadowsocks/shadowsocks-rust/releases/download/" + $tag + "/" + .name))) | select($arch == "" or any(.assets[]; (.name // "") | endswith("." + $arch + ".tar.xz"))) | .tag_name=$tag')"; then
     printf '%s\n' "$release_json"
     return 0
   fi
@@ -200,7 +234,7 @@ get_release_by_tag() {
     {tag_name: $tag, assets: ([. | scan("href=\"(/shadowsocks/shadowsocks-rust/releases/download/[^\"]+)\"") | .[0]
       | select(startswith("/shadowsocks/shadowsocks-rust/releases/download/" + $tag + "/"))
       | {name: (split("/") | last), browser_download_url: ("https://github.com" + .)}] | unique_by(.name))}
-    | select(.assets | length > 0)' <<<"$assets_html"
+    | select(.assets | length > 0)' <<<"$assets_html" || return 1
 }
 
 download_release_asset() {
@@ -279,6 +313,7 @@ ensure_user() {
     useradd --system --no-create-home --shell /usr/sbin/nologin "$user"
     TX_CREATED_USER=1
   fi
+  validate_user_groups "$user" || return 1
   TX_USER_GID="$(id -g "$user")" || die "Cannot resolve primary GID for $user"
   [[ "$TX_USER_GID" =~ ^[0-9]+$ ]] || die "Invalid primary GID for $user"
   TX_USER_GROUP="$(getent group "$TX_USER_GID" | awk -F: 'NR == 1 {print $1}')"
@@ -544,6 +579,8 @@ main() {
   need_cmd uname
 
   [[ ! -L "$bin_dir" && ! -L "$config_dir" ]] || die "Symlink install directory refused"
+  validate_directory_chain "$bin_dir" || return 1
+  validate_directory_chain "$config_dir" || return 1
   bin_dir="$(normalize_path "$bin_dir")"
   config_dir="$(normalize_path "$config_dir")"
   validate_install_inputs "$bin_dir" "$config_dir" "$user"
@@ -679,6 +716,8 @@ main() {
   write_systemd_unit "${TX_DIR}/stage/unit" "$ss_bin" "$config_path" "$config_dir" "$user" "$TX_USER_GID"
   chmod 644 "${TX_DIR}/stage/unit"
   write_install_meta "${TX_DIR}/stage/meta" "$ss_bin" "$config_dir" "$config_path" "$user" "$service_name" "$version"
+  validate_directory_chain "$bin_dir" || return 1
+  validate_directory_chain "$config_dir" || return 1
   mkdir -p "$bin_dir" "$config_dir"
   chmod 750 "$config_dir"; chown root:"$TX_USER_GID" "$config_dir"
   atomic_replace "${TX_DIR}/ssserver" "$ss_bin"

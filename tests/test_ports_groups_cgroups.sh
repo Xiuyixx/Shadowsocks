@@ -12,9 +12,15 @@ for port in 1 0001 65535 00065535; do [[ "$(normalize_port "$port")" == "$((10#$
 [[ "$(normalize_port "$(printf '%01000d' 1)")" == 1 ]]
 for port in 0 000 65536 99999999999999999999999999999999 18446744073709551617 -1 +1 1.0 1e3; do assert_fails normalize_port "$port"; done
 # Existing user has a differently named primary group; same-name group absent.
-id() { case "$*" in '-u svc') echo 987 ;; '-g svc') echo 654 ;; *) return 1 ;; esac; }
+id() { case "$*" in '-u svc') echo 987 ;; '-g svc'|'-G svc') echo 654 ;; *) return 1 ;; esac; }
 getent() { [[ "$*" == 'group 654' ]] || return 1; echo 'shared-primary:x:654:'; }
 ensure_user svc
+# Extra database groups cannot be removed by an empty SupplementaryGroups=.
+(
+  id() { case "$1" in -u) echo 987 ;; -g) echo 654 ;; -G) echo '654 27' ;; esac; }
+  assert_fails ensure_user svc
+  assert_fails validate_install_inputs "$work/bin" "$work/config-dir" svc
+)
 [[ "$TX_USER_GID" == 654 && "$TX_USER_GROUP" == shared-primary && "$TX_CREATED_USER" == 0 ]]
 write_systemd_unit "$work/unit" /opt/bin/ssserver /opt/config/config.json /opt/config svc "$TX_USER_GID"
 grep -q '^Group=654$' "$work/unit"
@@ -22,7 +28,7 @@ install() { [[ "$*" == *'-g 654 '* ]]; command cp "${@: -2}"; }
 write_config "$work/config" 8388 key aes-128-gcm tcp_only "$TX_USER_GID"
 # New users resolve their actual primary group after creation as well.
 created=0
-id() { (( created )) || return 1; case "$1" in -u) echo 987 ;; -g) echo 654 ;; esac; }
+id() { (( created )) || return 1; case "$1" in -u) echo 987 ;; -g|-G) echo 654 ;; esac; }
 useradd() { created=1; }
 ensure_user svc
 [[ "$TX_CREATED_USER" == 1 && "$TX_USER_GID" == 654 ]]

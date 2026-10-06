@@ -17,12 +17,16 @@ for cmd in python3 jq ss flock shellcheck curl openssl xz tar; do command -v "$c
 work="$(mktemp -d /opt/ss-integration.XXXXXX)"
 chmod 755 "$work" # Service account must traverse the isolated fixture parent.
 cleanup() {
-  systemctl disable --now shadowsocks-server.service >/dev/null 2>&1 || true
-  rm -f /etc/systemd/system/shadowsocks-server.service
-  systemctl daemon-reload
-  userdel ss-integration >/dev/null 2>&1 || true
-  groupdel ss-integration-primary >/dev/null 2>&1 || true
-  rm -rf -- "$work"
+  local original_status=$? cleanup_status=0
+  systemctl disable --now shadowsocks-server.service >/dev/null 2>&1 || { echo 'Cleanup failed: disable service' >&2; cleanup_status=1; }
+  rm -f /etc/systemd/system/shadowsocks-server.service || { echo 'Cleanup failed: remove unit' >&2; cleanup_status=1; }
+  systemctl daemon-reload || { echo 'Cleanup failed: daemon-reload' >&2; cleanup_status=1; }
+  userdel ss-integration >/dev/null 2>&1 || { echo 'Cleanup failed: delete user' >&2; cleanup_status=1; }
+  groupdel ss-integration-primary >/dev/null 2>&1 || { echo 'Cleanup failed: delete group' >&2; cleanup_status=1; }
+  rm -rf -- "$work" || { echo 'Cleanup failed: remove work directory' >&2; cleanup_status=1; }
+  # Preserve the test failure; otherwise a cleanup failure must fail the run.
+  if (( original_status != 0 )); then return "$original_status"; fi
+  return "$cleanup_status"
 }
 trap cleanup EXIT
 groupadd --system ss-integration-primary

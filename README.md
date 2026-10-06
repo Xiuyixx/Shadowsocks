@@ -124,6 +124,8 @@ journalctl -u shadowsocks-server.service -e --no-pager
 
 ## 升级 / 重跑
 
+安装前检查二进制/配置目录及所有已存在祖先：必须为 root 所有、不可 group/world-writable；仅祖先允许 root-owned sticky 目录（如 `/tmp`），目标目录仍须不可被其他用户写入。缺目录检查已存在祖先；不自动修复不安全目录权限。运行账户只允许其主组（主组名称可与用户名不同），有额外 supplementary groups 的已有账户会被拒绝，请使用专用账户；脚本不修改已有账户的组集合。systemd 的空 `SupplementaryGroups=` 不会清除系统数据库中的组成员关系，因此不能代替该检查。
+
 重复运行会先下载校验并暂存文件，备份现有二进制、配置、unit 和元数据，再逐文件原子替换并启动/重启服务。只有 systemd MainPID 保持稳定、属于该服务 cgroup，且所需 TCP/UDP 监听由 MainPID 或该服务精确 cgroup / 后代 cgroup 内的进程持有，并连续通过 4 次（间隔 0.5 秒）探测才视为成功。支持 systemd cgroup v1 / v2；无关进程、相似 PID 或 cgroup 名称不能代替服务就绪。
 
 普通错误及 INT/TERM/HUP 会触发 EXIT 回滚：还原旧文件、配置目录权限、服务启用/运行状态；失败诊断及回滚异常写入 stderr；回滚不完整时保留备份目录并打印路径，供手动恢复。文件替换是逐文件原子的，不是跨文件原子事务；SIGKILL、断电、磁盘损坏不在自动回滚保证内，包管理器依赖安装也不回滚。
@@ -185,6 +187,9 @@ curl -fsSL https://raw.githubusercontent.com/Xiuyixx/Shadowsocks/main/uninstall.
 - 升级保留 `createdUser` 所有权；旧版/无元数据时保守保留用户，避免删除预先存在的账户。用户参数若与元数据不一致则拒绝卸载。
 - 如果存在 `install-meta.json`，卸载脚本会优先读取它来自动识别安装信息。
 - 如果你显式传了上面的参数，必须与经过验证的 metadata 一致，否则拒绝卸载。无 metadata 的旧安装必须能验证 unit 的 ExecStart/User 与配置结构；只删除安装器已知文件，保留目录中的其他文件。
+
+- 卸载先记录服务启用/运行状态，在每个目标文件旁建立 root 私有暂存目录，通过同 filesystem rename 保留 unit、二进制和安装器配置的备份；停止/禁用、暂存、daemon-reload 或 userdel 失败均返回非零并尝试恢复文件及服务状态，不会静默宣告成功。恢复失败会明确报告半卸载状态及仍保留的备份路径，请手动恢复；备份可能含密码，不应公开或长期遗留。
+- 这是逐目标 rename 与尽力回滚，不是跨文件或跨 filesystem 的原子事务；SIGKILL、断电、磁盘损坏及并发外部修改不在自动恢复保证内。服务账户删除是最后的不可逆步骤：即使 userdel 返回失败，也可能已改动账户数据库，脚本不会伪造重建账户。成功删除账户后不再回滚；若备份清理失败，返回非零并打印待清理路径。需要保留账户时使用 `--keep-user`。
 
 ## 开发与验证
 

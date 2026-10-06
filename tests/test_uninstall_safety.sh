@@ -14,11 +14,20 @@ done
 mkdir -p "$work/config" "$work/bin" "$work/mocks"
 printf keep > "$work/config/keep"
 printf keep > "$work/bin/ssserver"
-for cmd in systemctl userdel; do
-  # shellcheck disable=SC2016
-  printf '#!/usr/bin/env bash\nprintf "%%s %%s\\n" "%s" "$*" >> "$CALL_LOG"\n' "$cmd" > "$work/mocks/$cmd"
-  chmod +x "$work/mocks/$cmd"
-done
+cat > "$work/mocks/userdel" <<'MOCK'
+#!/usr/bin/env bash
+printf 'userdel %s\n' "$*" >> "$CALL_LOG"
+MOCK
+chmod +x "$work/mocks/userdel"
+cat > "$work/mocks/systemctl" <<'MOCK'
+#!/usr/bin/env bash
+printf 'systemctl %s\n' "$*" >> "$CALL_LOG"
+case "$1" in
+  is-active) exit 3 ;;
+  is-enabled) echo disabled; exit 1 ;;
+esac
+MOCK
+chmod +x "$work/mocks/systemctl"
 export CALL_LOG="$work/log" PATH="$work/mocks:$PATH"
 run_uninstall() { bash "$work/uninstaller" --yes --config-dir "$work/config" --bin-path "$work/bin/ssserver" "$@" > "$work/output" 2>&1; }
 assert_refused() {
