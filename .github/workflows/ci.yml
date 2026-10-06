@@ -23,6 +23,9 @@ jobs:
         run: shellcheck -S style install.sh uninstall.sh tests/*.sh
       - name: Run tests
         run: |
+          # Lock ownership and file-owner assertions intentionally require root.
+          # Fixtures redirect paths and mock service/user changes; no VM harness here.
           for test_file in tests/test_*.sh; do
-            bash "$test_file"
+            echo "Running $test_file"
+            sudo bash "$test_file"
           done
